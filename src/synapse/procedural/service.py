@@ -40,6 +40,10 @@ def classify_recall_family(query: str) -> str:
     return "knowledge_lookup"
 
 
+def is_procedural_evidence(answer_origin: str) -> bool:
+    return answer_origin in {"episodic", "semantic_fallback"}
+
+
 class ProceduralMemoryService:
     async def detect(self, session: AsyncSession) -> DetectionResult:
         events = list(
@@ -47,6 +51,8 @@ class ProceduralMemoryService:
         )
         grouped: dict[str, list[RecallEvent]] = defaultdict(list)
         for event in events:
+            if not is_procedural_evidence(event.answer_origin):
+                continue
             family = classify_recall_family(event.query)
             event.normalized_intent = family
             grouped[family].append(event)

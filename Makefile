@@ -1,4 +1,4 @@
-.PHONY: up down build logs replay test lint reset cactus
+.PHONY: up down build logs replay slack-preview slack-import test lint reset cactus
 
 up:
 	docker compose up -d --build --wait
@@ -14,6 +14,14 @@ logs:
 
 replay:
 	curl --fail --request POST http://localhost:$${SYNAPSE_WEB_PORT:-3000}/api/demo/replay
+
+slack-preview:
+	@test -n "$${SLACK_EXPORT_DIR}" || (echo "Set SLACK_EXPORT_DIR to the extracted Slack export directory" && exit 1)
+	docker compose run --rm -T -v "$${SLACK_EXPORT_DIR}:/data/slack-export:ro" api python -m synapse.sources.slack_import --export-root /data/slack-export --channel all-docwise --channel scribe-iteration --max-events 40 --max-per-channel 30 --min-score 4 --dry-run
+
+slack-import:
+	@test -n "$${SLACK_EXPORT_DIR}" || (echo "Set SLACK_EXPORT_DIR to the extracted Slack export directory" && exit 1)
+	docker compose run --rm -T -v "$${SLACK_EXPORT_DIR}:/data/slack-export:ro" api python -m synapse.sources.slack_import --export-root /data/slack-export --channel all-docwise --channel scribe-iteration --max-events 40 --max-per-channel 30 --min-score 4
 
 test:
 	docker compose run --rm --build test

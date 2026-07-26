@@ -9,3 +9,4 @@ apps/web/node_modules/
 apps/web/dist/
 test-results/
 playwright-report/
+slack-exports/

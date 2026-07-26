@@ -106,17 +106,52 @@ relationships, and evidence to the semantic graph.
 - Responsive React 19 and TypeScript interface served by nginx
 - Awake/System 1 episode timeline
 - PostgreSQL and Cactus status indicators
-- Mock replay and refresh controls
+- Episode refresh controls; source imports remain explicit CLI operations
 - Mem0 indexed/pending state per episode
 - Sleep-cycle control and persisted latest-run summary
-- Semantic entity browser with aliases, descriptions, kinds, and confidence
-- Relationship browser with source/target entities and episode evidence
-- External enrichment provider shown on enriched entities
+- Interactive, deterministically laid-out semantic graph with zoom, minimap, and type filters
+- Node and relationship inspector with aliases, attributes, confidence, and episode evidence
+- External enrichment provenance and selected company-profile fields in the graph inspector
+- Exact entity and relationship lists preserved in the Sleep Details view
 - Procedural pattern detection over real recall history
 - Skill workflow, trigger, guardrail, confidence, and evidence inspection
 - Candidate approval and rejection controls
 
-## Mock Dataset
+## Source Data
+
+### Local Slack Export
+
+The preferred demo source is a locally extracted Slack export. The importer reads the
+export through a temporary read-only Docker mount and does not copy users, messages,
+attachments, avatars, emails, or phone fields into the repository. It:
+
+- Resolves human user IDs to display names while excluding bots, deleted users, and system events
+- Bundles a root message and its replies into one episodic conversation
+- Redacts emails, phone numbers, secret-like tokens, and raw link targets
+- Scores decisions, blockers, actions, deadlines, status updates, threads, reactions, and files
+- Balances selected conversations across channels instead of letting the largest channel dominate
+- Uses compact local Gemma calls for System 1 classification and one evidence-backed graph assertion
+
+Preview aggregate selection statistics without storing or printing message content:
+
+```sh
+export SLACK_EXPORT_DIR="/absolute/path/to/extracted-slack-export"
+make slack-preview
+```
+
+The default preview selects up to 40 conversations with a score of at least 4, capped at
+30 per channel from `all-docwise` and `scribe-iteration`. Import the same deterministic set:
+
+```sh
+make slack-import
+curl --fail --request POST http://localhost:3000/api/system2/consolidate
+```
+
+Re-running the import is idempotent because source IDs derive from channel and Slack thread
+timestamps. Keep the export outside this repository; `slack-exports/` is ignored as an
+additional guard if a local copy is ever created.
+
+### Mock Fallback
 
 The deterministic fixture contains 18 chronological Slack and meeting episodes covering:
 
@@ -161,7 +196,8 @@ Start native Gemma in a separate terminal and leave it running:
 make cactus
 ```
 
-Start the Docker stack and replay the fixture:
+Start the Docker stack, then import a Slack export as above. For a public fallback with no
+private workspace data, replay the deterministic fixture explicitly:
 
 ```sh
 make up
@@ -285,6 +321,8 @@ explicitly desired.
 make up       # Build and start the Docker stack
 make cactus   # Start native Gemma on Cactus/Metal
 make replay   # Process or reconcile the mock event stream
+make slack-preview # Preview aggregate real-export selection metadata
+make slack-import  # Import the selected local Slack conversations
 make logs     # Follow API, worker, and web logs
 make lint     # Run Python and frontend static checks
 make test     # Run backend tests and frontend validation
@@ -305,6 +343,7 @@ The current implementation passes:
 - Alembic migration against PostgreSQL 18
 - Docker Compose health checks
 - Duplicate replay and pending-memory reconciliation
+- Slack thread grouping, bot exclusion, redaction, ranking, and channel balancing
 - Native Gemma chat and embedding smoke tests
 - System 2 migration, extraction, alias, evidence, and API schema tests
 - Gemma alias-adjudication and fallback tests
