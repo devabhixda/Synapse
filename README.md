@@ -1,37 +1,94 @@
 # Synapse
 
-Synapse is a working fast-and-slow memory POC. System 1 replays mocked Slack and meeting
-events, interprets each event with a local model, persists the original episode and its
-provisional observation, and indexes the episode in Mem0. A user-triggered System 2 sleep
-cycle freezes the source episodes and consolidates them into an evidence-backed semantic
-graph. System 1 source information comes only from the deterministic mock Slack and meeting
-adapters.
+**A local-first cognitive memory layer that turns scattered workplace conversations into
+episodic memories, evidence-backed knowledge graphs, and reusable agent workflows.**
 
-## Current Flow
+## Demo Video
+
+[Watch the Synapse demo on Loom](https://www.loom.com/share/219bf4ea14e849dd81a5ed1c45c57000)
+
+Teams do not lose context because information is absent; they lose it because decisions,
+owners, blockers, and rationale are buried across thousands of messages. Search returns more
+messages. Synapse builds memory.
+
+Inspired by *Thinking, Fast and Slow*, Synapse separates organizational cognition into three
+phases:
+
+1. **Awake / System 1:** capture high-signal conversations, classify them locally, and index
+	 them as durable episodes.
+2. **Sleep / System 2:** consolidate episodes into an inspectable semantic graph where every
+	 relationship cites its source conversation.
+3. **Procedural memory:** observe repeated successful recall workflows and propose versioned
+	 skills that require human approval before agents can use them.
+
+## Why It Is Different
+
+- **Episodic-first retrieval:** search lived conversations before consulting derived knowledge.
+- **Memory that learns from retrieval:** a successful graph fallback is written back as a new
+	episode, making similar future questions faster and more direct.
+- **Evidence over confident summaries:** every semantic edge retains the Slack conversation
+	that supports it.
+- **Local inference:** Gemma runs through Cactus on Apple Metal; raw conversations are not sent
+	to a hosted LLM.
+- **Human-reviewed procedures:** repeated behavior can become an MCP skill, but misses never do
+	and candidates remain private until approved.
+- **Agent boundary:** Synapse supplies context and procedure; VS Code/Copilot owns code edits,
+	commands, and tests.
+
+## Demo Snapshot
+
+The prepared local demo currently contains:
+
+| Signal | Verified state |
+| --- | ---: |
+| Real Slack conversations | 40 thread-bundled episodes |
+| Mem0 indexing | 40 / 40 indexed |
+| Semantic graph | 43 entities, 40 relationships |
+| Evidence coverage | 40 / 40 relationships cited |
+| Inference failures | 0 observation, 0 assertion failures |
+
+The private Slack export is never committed. It is mounted read-only for a one-shot import;
+emails, phone numbers, secret-like tokens, bots, deleted users, and system events are filtered
+before ingestion.
+
+## Sponsor Technology
+
+- **Cactus:** runs `google/gemma-4-E2B-it` locally for System 1 classification, compact semantic
+	assertions, answerability checks, alias adjudication, and 1,536-dimensional embeddings.
+- **Crustdata:** enriches resolved company nodes during System 2 only; coverage misses remain
+	unknown instead of being filled with fixture data.
+- **Mem0:** provides the episodic vector-memory layer over PostgreSQL/pgvector.
+
+The product also demonstrates how approved Synapse procedures can guide coding agents through
+MCP without giving the memory server code-execution authority.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-	A[Mock Slack and meetings] --> B[System 1 event processing]
-	B --> C[Gemma 4 on Cactus]
-	C --> D[PostgreSQL episodes and observations]
-	D --> E[Mem0 and pgvector index]
-	D --> F[Awake workbench]
-	D --> G[System 2 sleep cycle]
-	G --> H[Deterministic evidence candidates]
-	H --> I[Gemma alias adjudication]
-	I --> J[Crustdata company enrichment]
-	J --> K[Semantic graph and Sleep workbench]
-	L[VS Code agent] --> M[MCP recall]
-	M --> N{Episode answers?}
-	N -->|Yes| O[Serve episodic memory]
-	N -->|No| K
-	K --> P[Serve semantic answer]
-	P --> Q[Create retrieval episode]
-	Q --> E
-	Q --> R[Recall behavior patterns]
-	R --> S[Versioned skill candidate]
-	S --> T[User review]
-	T --> U[Approved MCP skill spec]
+	A[Read-only Slack export] --> B[Thread bundling, redaction, signal ranking]
+	C[Public mock fallback] --> B
+	B --> D[System 1 event processing]
+	D --> E[Gemma 4 on Cactus]
+	E --> F[PostgreSQL episodes and observations]
+	F --> G[Mem0 and pgvector index]
+	F --> H[Awake workbench]
+	F --> I[System 2 sleep cycle]
+	I --> J[Evidence-backed assertions]
+	J --> K[Gemma alias adjudication]
+	K --> L[Crustdata company enrichment]
+	L --> M[Interactive semantic graph]
+	N[VS Code agent] --> O[MCP recall]
+	O --> P{Episode answers?}
+	P -->|Yes| Q[Serve episodic memory]
+	P -->|No| M
+	M --> R[Serve cited semantic answer]
+	R --> S[Create retrieval episode]
+	S --> G
+	S --> T[Observe successful recall patterns]
+	T --> U[Versioned skill candidate]
+	U --> V[Human review]
+	V --> W[Approved MCP skill]
 ```
 
 System 1 currently produces:
@@ -46,76 +103,27 @@ System 1 currently produces:
 These observations remain provisional. Only System 2 writes canonical entities, aliases,
 relationships, and evidence to the semantic graph.
 
-## Implemented Components
+## What We Built
 
-### Backend
+- **Awake workbench:** a chronological episode stream with local-model intent, salience,
+	participants, source metadata, and Mem0 indexing state.
+- **Sleep workbench:** an interactive React Flow graph with deterministic Dagre layout, type
+	filters, minimap, zoom controls, relationship evidence, and external enrichment provenance.
+- **Episodic-first recall:** typed HTTP and MCP tools that answer from episodes, use semantic
+	fallback only when required, preserve citations, and learn from successful fallback.
+- **Procedural workbench:** repeated successful recall patterns become immutable, versioned
+	skill candidates with approve/reject controls and approved-only MCP exposure.
 
-- FastAPI application with health, configuration, episode-listing, and mock-replay routes
-- SQLAlchemy models for source/retrieval episodes, intent observations, and recall events
-- Alembic migration that creates the PostgreSQL schema and enables pgvector
-- Duplicate-safe ingestion using stable source identifiers
-- Pending-memory reconciliation when an episode exists but has not been indexed
-- Persisted System 2 runs with frozen episode membership, stages, status, and graph diffs
-- Generic consolidation of validated source assertions into canonical entities and relationships
-- Source-owned aliases, descriptions, attributes, and relationship evidence
-- Gemma adjudication of evidence-backed alias candidates with deterministic fallback
-- Crustdata domain identification and selected company-profile enrichment
-- Provider-specific 24-hour enrichment cache
-- Idempotent graph upserts and relationship-to-episode evidence links
-- Episodic-first recall with Gemma answerability selection
-- Evidence-backed semantic fallback and explicit total misses
-- Retrieval-episode write-back into Mem0 for future paraphrased queries
-- Recall-event telemetry recording origin, selected IDs, scores, and latency
-- Recall-query classification into stable workflow families
-- Repeated-workflow detection with an explicit minimum occurrence threshold
-- Declarative skill synthesis with immutable revisions and review status
-- Worker container with database connectivity for background-process scaffolding
+## Stack
 
-### MCP
-
-- Stable MCP Python SDK v1 server over stdio
-- Typed `recall` tool using the mandatory episodic-first learning loop
-- Typed `get_episode` tool for citation inspection
-- Typed `list_skill_specs` and `get_skill_spec` tools exposing approved workflows only
-- Docker Compose launch through `.vscode/mcp.json`
-- Workspace instructions requiring coding agents to use `recall` for organizational context
-
-### Local Inference
-
-- Cactus 2.0.1 running natively on macOS with Apple Metal
-- `google/gemma-4-E2B-it` for compact System 1 intent and salience classification
-- Event-local assembly for summaries, explicit mentions, and tags to avoid brittle long JSON
-- The same Gemma server for 1,536-dimensional embeddings
-- OpenAI-compatible chat, model, and embedding endpoints on port `8080`
-- Fail-closed `auto` mode: invalid or unavailable Cactus does not store a fallback observation
-- Explicit deterministic interpretation only with `INFERENCE_MODE=fake`
-
-### Memory and Storage
-
-- PostgreSQL 18 with pgvector 0.8.5 in Docker
-- Mem0 OSS embedded in the FastAPI process
-- Mem0 collection `synapse_episodes_gemma_1536`
-- Exact Mem0 writes with `infer=False`; Synapse controls the stored summaries
-- Mem0 hybrid semantic, keyword, and entity-aware retrieval support
-- In-memory Mem0 operation history; durable application state remains in PostgreSQL
-- Persistent PostgreSQL Docker volume
-- External semantic attributes with provider, field group, confidence, source URL, and time
-
-### Workbench
-
-- Responsive React 19 and TypeScript interface served by nginx
-- Awake/System 1 episode timeline
-- PostgreSQL and Cactus status indicators
-- Episode refresh controls; source imports remain explicit CLI operations
-- Mem0 indexed/pending state per episode
-- Sleep-cycle control and persisted latest-run summary
-- Interactive, deterministically laid-out semantic graph with zoom, minimap, and type filters
-- Node and relationship inspector with aliases, attributes, confidence, and episode evidence
-- External enrichment provenance and selected company-profile fields in the graph inspector
-- Exact entity and relationship lists preserved in the Sleep Details view
-- Procedural pattern detection over real recall history
-- Skill workflow, trigger, guardrail, confidence, and evidence inspection
-- Candidate approval and rejection controls
+| Layer | Technology |
+| --- | --- |
+| Local AI | Cactus, Gemma 4 E2B, Apple Metal |
+| Episodic memory | Mem0 OSS |
+| Durable storage | PostgreSQL 18, pgvector, SQLAlchemy, Alembic |
+| API and agents | FastAPI, MCP Python SDK v1 |
+| Workbench | React 19, TypeScript, React Flow, Dagre, Vite |
+| Runtime | Docker Compose; native Cactus is the Metal-accelerated exception |
 
 ## Source Data
 
@@ -196,11 +204,25 @@ Start native Gemma in a separate terminal and leave it running:
 make cactus
 ```
 
-Start the Docker stack, then import a Slack export as above. For a public fallback with no
-private workspace data, replay the deterministic fixture explicitly:
+Start the Docker stack:
 
 ```sh
 make up
+```
+
+Then choose one source path.
+
+For a local Slack export:
+
+```sh
+export SLACK_EXPORT_DIR="/absolute/path/to/extracted-slack-export"
+make slack-preview
+make slack-import
+```
+
+For the public deterministic fallback:
+
+```sh
 make replay
 ```
 
@@ -210,7 +232,7 @@ Open the Sleep view and select **Start sleep cycle**, or trigger it directly:
 curl --fail --request POST http://localhost:3000/api/system2/consolidate
 ```
 
-Ask Synapse through HTTP:
+Ask Synapse through HTTP. This example is available with the public fallback dataset:
 
 ```sh
 curl --fail http://localhost:3000/api/recall \
@@ -242,7 +264,7 @@ Available tools:
 - `list_skill_specs()` lists approved procedural workflows.
 - `get_skill_spec(name)` returns one approved workflow with steps and guardrails.
 
-Example agent prompts:
+With the public fallback dataset, example agent prompts are:
 
 ```text
 Use the synapse-memory recall tool to compare the team decisions about Random Labs,
@@ -252,6 +274,9 @@ Hexclave, Channel3, and Allus AI. Include the evidence citations.
 ```text
 Ask Synapse why the Channel3 integration was limited to public product context.
 ```
+
+With a private Slack import, use a person, task, product, or decision visible in the Awake
+timeline so the recording does not disclose unrelated workspace context.
 
 For an answer already present in an episode, `answer_origin` is `episodic`. When episodes
 do not contain the answer, it is `semantic_fallback` and `created_episode_id` identifies the
@@ -318,22 +343,23 @@ explicitly desired.
 ## Commands
 
 ```sh
-make up       # Build and start the Docker stack
-make cactus   # Start native Gemma on Cactus/Metal
-make replay   # Process or reconcile the mock event stream
-make slack-preview # Preview aggregate real-export selection metadata
-make slack-import  # Import the selected local Slack conversations
-make logs     # Follow API, worker, and web logs
-make lint     # Run Python and frontend static checks
-make test     # Run backend tests and frontend validation
-make down     # Stop containers while preserving PostgreSQL data
-make reset    # Stop containers and delete the PostgreSQL volume
+make up             # Build and start the Docker stack
+make cactus         # Start native Gemma on Cactus/Metal
+make slack-preview  # Preview aggregate real-export selection metadata
+make slack-import   # Import selected local Slack conversations
+make replay         # Process the public mock fallback
+make logs           # Follow API, worker, and web logs
+make lint           # Run Python and frontend static checks
+make test           # Run backend tests and frontend validation
+make down           # Stop containers while preserving PostgreSQL data
+make reset          # Stop containers and delete the PostgreSQL volume
 ```
 
-## Validation Status
+## Verified
 
 The current implementation passes:
 
+- 21 backend tests
 - Ruff
 - Strict mypy
 - Pytest
@@ -342,6 +368,8 @@ The current implementation passes:
 - Vite production build
 - Alembic migration against PostgreSQL 18
 - Docker Compose health checks
+- A live 40-conversation import with zero observation or assertion failures
+- A live 43-entity, 40-relationship graph with evidence on every edge
 - Duplicate replay and pending-memory reconciliation
 - Slack thread grouping, bot exclusion, redaction, ranking, and channel balancing
 - Native Gemma chat and embedding smoke tests
@@ -357,7 +385,7 @@ The current implementation passes:
 - Candidate approval synchronization between patterns and skills
 - Approved-only procedural skill discovery through MCP
 
-## Current Boundaries
+## Honest Boundaries
 
 System 2 deterministically merges validated semantic assertions emitted by source adapters,
 then uses Gemma to adjudicate ambiguous aliases. Assertions use generic entity and
@@ -366,4 +394,6 @@ The installed E2B model is not used to generate the complete nested graph becaus
 structured output is unreliable. The current procedural templates cover company research,
 architecture context, and project status briefing families. Pattern classification and
 synthesis are deterministic and transparent rather than LLM-generated. Synapse exposes
-approved guidance only; coding actions remain with the VS Code agent.
+approved guidance only; coding actions remain with the VS Code agent. The Slack importer
+selects a balanced high-signal subset rather than claiming that every workspace message is
+memory-worthy, and Crustdata enriches only company nodes it can identify confidently.
