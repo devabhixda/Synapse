@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     cactus_embedding_model: str = "google/gemma-4-E2B-it"
     embedding_dimensions: int = 1536
     inference_mode: str = "auto"
+    consolidation_mode: str = "auto"
+    crustdata_api_key: str | None = None
+    crustdata_base_url: str = "https://api.crustdata.com"
+    crustdata_api_version: str = "2025-11-01"
+    enrichment_cache_hours: int = Field(default=24, ge=1)
     memory_user_id: str = "local-user"
     memory_hit_threshold: float = Field(default=0.62, ge=0, le=1)
     mem0_collection: str = "synapse_episodes_gemma_1536"

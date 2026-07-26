@@ -68,6 +68,16 @@ class GraphNodeResponse(BaseModel):
     description: str | None
     attributes: dict[str, Any]
     confidence: float
+    external_attributes: list["ExternalAttributeResponse"]
+
+
+class ExternalAttributeResponse(BaseModel):
+    provider: str
+    field_group: str
+    payload: dict[str, Any]
+    source_url: str | None
+    confidence: float
+    observed_at: str
 
 
 class GraphEvidenceResponse(BaseModel):
@@ -233,6 +243,17 @@ async def get_graph(
                 description=entity.description,
                 attributes=entity.attributes,
                 confidence=entity.confidence,
+                external_attributes=[
+                    ExternalAttributeResponse(
+                        provider=external.provider,
+                        field_group=external.field_group,
+                        payload=external.payload,
+                        source_url=external.source_url,
+                        confidence=external.confidence,
+                        observed_at=external.observed_at.isoformat(),
+                    )
+                    for external in entity.external_attributes
+                ],
             )
             for entity in entities
         ],

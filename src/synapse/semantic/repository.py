@@ -9,7 +9,10 @@ async def load_entities(session: AsyncSession) -> list[SemanticEntity]:
     return list(
         await session.scalars(
             select(SemanticEntity)
-            .options(selectinload(SemanticEntity.aliases))
+            .options(
+                selectinload(SemanticEntity.aliases),
+                selectinload(SemanticEntity.external_attributes),
+            )
             .order_by(SemanticEntity.kind, SemanticEntity.canonical_name)
         )
     )

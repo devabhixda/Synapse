@@ -176,6 +176,9 @@ class SemanticEntity(Base):
     aliases: Mapped[list["EntityAlias"]] = relationship(
         back_populates="entity", cascade="all, delete-orphan"
     )
+    external_attributes: Mapped[list["ExternalAttribute"]] = relationship(
+        back_populates="entity", cascade="all, delete-orphan"
+    )
 
 
 class EntityAlias(Base):
@@ -193,6 +196,33 @@ class EntityAlias(Base):
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
 
     entity: Mapped[SemanticEntity] = relationship(back_populates="aliases")
+
+
+class ExternalAttribute(Base):
+    __tablename__ = "external_attributes"
+    __table_args__ = (
+        UniqueConstraint(
+            "entity_id", "provider", "field_group", name="uq_external_attribute"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("semantic_entities.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(80), index=True)
+    field_group: Mapped[str] = mapped_column(String(120))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    entity: Mapped[SemanticEntity] = relationship(back_populates="external_attributes")
 
 
 class SemanticRelationship(Base):

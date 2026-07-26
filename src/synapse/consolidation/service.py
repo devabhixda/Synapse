@@ -1,23 +1,35 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from synapse.consolidation.extractor import derive_semantic_plan, normalize_name
+from synapse.config import get_settings
+from synapse.consolidation.extractor import normalize_name
+from synapse.consolidation.llm_extractor import GemmaSemanticExtractor, SemanticExtractor
 from synapse.db.models import (
     ConsolidationEpisode,
     ConsolidationRun,
     EntityAlias,
     Episode,
     EpisodeKind,
+    ExternalAttribute,
     RelationshipEvidence,
     SemanticEntity,
     SemanticRelationship,
 )
+from synapse.enrichment.crustdata import CompanyEnricher, CrustdataEnricher
 
 
 class ConsolidationService:
+    def __init__(
+        self,
+        extractor: SemanticExtractor | None = None,
+        enricher: CompanyEnricher | None = None,
+    ) -> None:
+        self.extractor = extractor or GemmaSemanticExtractor()
+        self.enricher = enricher or CrustdataEnricher()
+
     async def run(self, session: AsyncSession) -> ConsolidationRun:
         run = ConsolidationRun(
             status="running",
@@ -48,7 +60,11 @@ class ConsolidationService:
             run.stage = "extracting"
             await session.commit()
 
-            plan = derive_semantic_plan(episodes)
+            extraction = await self.extractor.extract(episodes)
+            plan = extraction.plan
+            run.provider = extraction.provider
+            if extraction.fallback_reason:
+                run.graph_diff = {"extraction_fallback": extraction.fallback_reason}
             run.stage = "linking"
             await session.commit()
 
@@ -56,6 +72,12 @@ class ConsolidationService:
             updated_entities = 0
             created_relationships = 0
             updated_relationships = 0
+            created_enrichments = 0
+            updated_enrichments = 0
+            skipped_enrichments = 0
+            cached_enrichments = 0
+            failed_enrichments = 0
+            enrichment_providers: set[str] = set()
             entity_by_key: dict[str, SemanticEntity] = {}
 
             for entity_spec in plan.entities:
@@ -101,6 +123,67 @@ class ConsolidationService:
                         )
                         existing_aliases.add(normalized_alias)
                 entity_by_key[entity_spec.key] = entity
+
+            run.stage = "enriching"
+            for entity_spec in plan.entities:
+                if entity_spec.kind != "Company":
+                    continue
+                entity = entity_by_key[entity_spec.key]
+                domain = entity_spec.attributes.get("domain")
+                settings = get_settings()
+                preferred_provider = (
+                    "crustdata" if settings.crustdata_api_key else "crustdata-fixture"
+                )
+                cached_enrichment = await session.scalar(
+                    select(ExternalAttribute).where(
+                        ExternalAttribute.entity_id == entity.id,
+                        ExternalAttribute.provider == preferred_provider,
+                        ExternalAttribute.field_group == "company_profile",
+                        ExternalAttribute.updated_at
+                        >= datetime.now(UTC)
+                        - timedelta(hours=settings.enrichment_cache_hours),
+                    )
+                )
+                if cached_enrichment is not None:
+                    cached_enrichments += 1
+                    enrichment_providers.add(cached_enrichment.provider)
+                    continue
+                try:
+                    enrichment = await self.enricher.enrich_company(
+                        entity_spec.canonical_name, domain
+                    )
+                except Exception:
+                    failed_enrichments += 1
+                    continue
+                if enrichment is None:
+                    skipped_enrichments += 1
+                    continue
+
+                external_attribute = await session.scalar(
+                    select(ExternalAttribute).where(
+                        ExternalAttribute.entity_id == entity.id,
+                        ExternalAttribute.provider == enrichment.provider,
+                        ExternalAttribute.field_group == enrichment.field_group,
+                    )
+                )
+                if external_attribute is None:
+                    external_attribute = ExternalAttribute(
+                        entity_id=entity.id,
+                        provider=enrichment.provider,
+                        field_group=enrichment.field_group,
+                        payload=enrichment.payload,
+                        source_url=enrichment.source_url,
+                        confidence=enrichment.confidence,
+                    )
+                    session.add(external_attribute)
+                    created_enrichments += 1
+                else:
+                    external_attribute.payload = enrichment.payload
+                    external_attribute.source_url = enrichment.source_url
+                    external_attribute.confidence = enrichment.confidence
+                    external_attribute.updated_at = datetime.now(UTC)
+                    updated_enrichments += 1
+                enrichment_providers.add(enrichment.provider)
 
             episode_by_source_id = {
                 episode.source_id: episode for episode in episodes if episode.source_id
@@ -159,11 +242,19 @@ class ConsolidationService:
             run.entity_count = len(plan.entities)
             run.relationship_count = len(plan.relationships)
             run.graph_diff = {
+                **run.graph_diff,
                 "entities_created": created_entities,
                 "entities_updated": updated_entities,
                 "relationships_created": created_relationships,
                 "relationships_updated": updated_relationships,
+                "enrichments_created": created_enrichments,
+                "enrichments_updated": updated_enrichments,
+                "enrichments_skipped": skipped_enrichments,
+                "enrichments_cached": cached_enrichments,
+                "enrichments_failed": failed_enrichments,
             }
+            if enrichment_providers:
+                run.provider = run.provider + "+" + "+".join(sorted(enrichment_providers))
             run.status = "succeeded"
             run.stage = "complete"
             run.completed_at = datetime.now(UTC)
