@@ -26,6 +26,7 @@ ALLOWED_ENTITY_KINDS = {
     "Person",
     "Team",
     "Company",
+    "Product",
     "Project",
     "System",
     "Repository",

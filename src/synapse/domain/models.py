@@ -16,6 +16,37 @@ class SourceEvent(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class SemanticEntityAssertion(BaseModel):
+    kind: str
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    description: str | None = None
+    attributes: dict[str, str] = Field(default_factory=dict)
+    confidence: float = Field(default=1.0, ge=0, le=1)
+
+
+class SemanticRelationshipAssertion(BaseModel):
+    subject_kind: str
+    subject_name: str
+    predicate: str
+    object_kind: str
+    object_name: str
+    attributes: dict[str, str] = Field(default_factory=dict)
+    confidence: float = Field(default=1.0, ge=0, le=1)
+
+
+class SemanticAssertions(BaseModel):
+    entities: list[SemanticEntityAssertion] = Field(default_factory=list)
+    relationships: list[SemanticRelationshipAssertion] = Field(default_factory=list)
+
+
+def semantic_assertions(metadata: dict[str, Any]) -> SemanticAssertions:
+    payload = metadata.get("semantic_assertions")
+    if not isinstance(payload, dict):
+        return SemanticAssertions()
+    return SemanticAssertions.model_validate(payload)
+
+
 class FastObservation(BaseModel):
     summary: str
     intent: str

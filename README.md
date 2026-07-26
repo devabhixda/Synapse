@@ -39,7 +39,7 @@ System 1 currently produces:
 - A Gemma-classified intent label
 - Gemma-classified salience from 0 to 1
 - An event-local compact summary assembled without cross-event inference
-- Explicit entity mentions found in the event
+- Explicit entity mentions supplied by validated source assertions
 - Source and intent retrieval tags
 - Provider and latency metadata
 
@@ -56,8 +56,8 @@ relationships, and evidence to the semantic graph.
 - Duplicate-safe ingestion using stable source identifiers
 - Pending-memory reconciliation when an episode exists but has not been indexed
 - Persisted System 2 runs with frozen episode membership, stages, status, and graph diffs
-- Deterministic fixture consolidation into canonical semantic entities and relationships
-- Alias resolution connecting `auth database` to the canonical Titan entity
+- Generic consolidation of validated source assertions into canonical entities and relationships
+- Source-owned aliases, descriptions, attributes, and relationship evidence
 - Gemma adjudication of evidence-backed alias candidates with deterministic fallback
 - Crustdata domain identification and selected company-profile enrichment
 - Provider-specific 24-hour enrichment cache
@@ -118,25 +118,28 @@ relationships, and evidence to the semantic graph.
 
 ## Mock Dataset
 
-The deterministic fixture contains 14 chronological Slack and meeting episodes covering:
+The deterministic fixture contains 18 chronological Slack and meeting episodes covering:
 
-- The decision to name the authentication database Titan
-- Titan and Atlas API migration context, repository location, and dual-write rollout
-- Security approval, KMS encryption, token TTL, and rollback constraints
-- A session-backfill blocker, root cause, repair owner, and resolution
-- Repeated project-status requests with owners, readiness, and next actions
-- A phased production rollout and migration retrospective
-- A proposal and policy decision for Crustdata enrichment during memory consolidation
+- Officially sourced product context for Channel3, Allus AI, Random Labs, and Hexclave
+- Internal evaluation decisions that adopt, defer, or limit each possible integration
+- The boundary between Synapse memory guidance and Random Labs repository execution
+- Hexclave as a future identity candidate for a multi-user Synapse
+- A non-critical Channel3 API-access blocker and the decision not to fake an integration
+- Repeated status requests with explicit owners, deadlines, blockers, and next actions
+- Recall rehearsal and final demo-readiness approval
 
-These fixture events are the only source information ingested by System 1. Crustdata is
-called only from System 2 after a `Company` entity and domain have been resolved.
+Public product claims include an official source URL in event metadata. Internal fit,
+ownership, blocker, and scope statements are clearly framed as mock team decisions. The
+source adapter also supplies generic validated semantic assertions; extraction code has no
+knowledge of sponsor names. Crustdata is called only from System 2 after a `Company` entity
+and domain have been resolved. It is an enrichment provider, not a source-memory company.
 
 Replaying the fixture multiple times does not duplicate episodes. With Cactus running, all
-14 episodes are indexed in Mem0/pgvector. A sleep cycle currently produces 22 canonical
-entities, 20 relationships, and evidence-backed aliases and attributes. Repeating the
-sleep cycle updates the existing graph without duplicating it. With
-`CRUSTDATA_API_KEY` configured, the Crustdata company node receives a live company profile;
-without a key, an equivalent fixture payload keeps the demo deterministic.
+18 episodes are indexed in Mem0/pgvector. A sleep cycle currently produces 21 canonical
+entities and 20 relationships. Repeating the sleep cycle updates the existing graph without
+duplicating it. With `CRUSTDATA_API_KEY` configured, Crustdata attempts live enrichment for
+the four sponsor company nodes; provider coverage is preserved as an observed result rather
+than filled with invented data.
 
 ## Run Locally
 
@@ -176,7 +179,7 @@ Ask Synapse through HTTP:
 ```sh
 curl --fail http://localhost:3000/api/recall \
 	--header 'Content-Type: application/json' \
-	--data '{"query":"What industry is Crustdata in and how large is it?"}'
+	--data '{"query":"What does Random Labs build and how does it complement Synapse?"}'
 ```
 
 ### Use MCP in VS Code
@@ -206,12 +209,12 @@ Available tools:
 Example agent prompts:
 
 ```text
-Use the synapse-memory recall tool to tell me what database Atlas API uses.
-Include the evidence citations.
+Use the synapse-memory recall tool to compare the team decisions about Random Labs,
+Hexclave, Channel3, and Allus AI. Include the evidence citations.
 ```
 
 ```text
-Ask Synapse what industry Crustdata is in and how large it is.
+Ask Synapse why the Channel3 integration was limited to public product context.
 ```
 
 For an answer already present in an episode, `answer_origin` is `episodic`. When episodes
@@ -305,7 +308,7 @@ The current implementation passes:
 - Native Gemma chat and embedding smoke tests
 - System 2 migration, extraction, alias, evidence, and API schema tests
 - Gemma alias-adjudication and fallback tests
-- Crustdata fixture and live-response parser tests
+- Crustdata no-key behavior and live-response parser tests
 - Live consolidation and graph idempotency checks
 - Live Crustdata enrichment and cache verification
 - Episodic miss → semantic fallback → retrieval-episode write-back
@@ -317,10 +320,11 @@ The current implementation passes:
 
 ## Current Boundaries
 
-System 2 uses deterministic evidence candidate generation tailored to the mock dataset,
-then uses Gemma to adjudicate ambiguous aliases. The installed E2B model is not used to
-generate the complete nested graph because its long structured output is unreliable. The
-current procedural templates cover company research, architecture context, and project
-status briefing families. Pattern classification and synthesis are deterministic and
-transparent rather than LLM-generated. Synapse exposes approved guidance only; coding
-actions remain with the VS Code agent.
+System 2 deterministically merges validated semantic assertions emitted by source adapters,
+then uses Gemma to adjudicate ambiguous aliases. Assertions use generic entity and
+relationship schemas; runtime extraction and inference contain no fixture-specific names.
+The installed E2B model is not used to generate the complete nested graph because its long
+structured output is unreliable. The current procedural templates cover company research,
+architecture context, and project status briefing families. Pattern classification and
+synthesis are deterministic and transparent rather than LLM-generated. Synapse exposes
+approved guidance only; coding actions remain with the VS Code agent.

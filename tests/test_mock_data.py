@@ -6,16 +6,17 @@ from synapse.sources.mock import mock_events
 def test_rich_mock_events_are_unique_chronological_and_multi_source() -> None:
     events = mock_events()
 
-    assert len(events) == 14
+    assert len(events) == 18
     assert len({event.source_id for event in events}) == len(events)
     assert [event.occurred_at for event in events] == sorted(
         event.occurred_at for event in events
     )
     assert {event.source_type.value for event in events} == {"slack", "meeting"}
     assert len({event.conversation_id for event in events}) >= 8
+    assert not any("crustdata" in event.content.casefold() for event in events)
 
 
-def test_rich_mock_events_produce_security_repository_and_rollout_context() -> None:
+def test_rich_mock_events_produce_sponsor_products_and_fit_decisions() -> None:
     episodes = [
         Episode(
             kind=EpisodeKind.SOURCE,
@@ -35,25 +36,32 @@ def test_rich_mock_events_produce_security_repository_and_rollout_context() -> N
     predicates = {relationship.predicate for relationship in plan.relationships}
 
     assert {
-        "Titan",
-        "Atlas API",
-        "KMS auth-prod",
-        "services/atlas-api",
-        "Titan session dual-write",
-        "Session backfill repair",
-        "Titan production rollout",
-        "Titan production monitoring",
-        "Security",
-        "Platform",
+        "Channel3",
+        "Channel3 API",
+        "Allus AI",
+        "Allus AI vision platform",
+        "Random Labs",
+        "Slate",
+        "Hexclave",
+        "Hexclave platform",
+        "Synapse",
+        "Channel3 developer API key unavailable",
+        "Keep Synapse MCP read-only",
     } <= names
-    assert {"encrypted_with", "implemented_in", "resolves", "part_of", "owns"} <= predicates
+    assert {
+        "offers",
+        "evaluated_for",
+        "optional_for",
+        "deferred_for",
+        "complements",
+        "identity_candidate_for",
+        "blocks",
+        "governs",
+    } <= predicates
 
-    crustdata_relationship = next(
+    channel3_relationship = next(
         relationship
         for relationship in plan.relationships
-        if relationship.predicate == "proposed_for"
+        if relationship.predicate == "optional_for"
     )
-    assert crustdata_relationship.evidence_source_ids == [
-        "meet-partnerships-001",
-        "slack-partnership-002",
-    ]
+    assert "slack-channel3-fit-001" in channel3_relationship.evidence_source_ids

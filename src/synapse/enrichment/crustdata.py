@@ -18,7 +18,7 @@ class CrustdataEnricher:
         if not domain:
             return None
         if not self.settings.crustdata_api_key:
-            return fixture_enrichment(name, domain)
+            return None
 
         headers = {
             "Authorization": f"Bearer {self.settings.crustdata_api_key}",
@@ -103,26 +103,3 @@ def parse_enrich_response(payload: object) -> dict[str, Any] | None:
         return None
     company_data = match.get("company_data")
     return company_data if isinstance(company_data, dict) else None
-
-
-def fixture_enrichment(name: str, domain: str) -> EnrichmentResult | None:
-    if domain.casefold() != "crustdata.com":
-        return None
-    return EnrichmentResult(
-        provider="crustdata-fixture",
-        field_group="company_profile",
-        payload={
-            "basic_info": {
-                "name": name,
-                "primary_domain": "crustdata.com",
-                "description": "Real-time company and people data APIs for AI agents.",
-                "industries": ["B2B data", "Artificial intelligence"],
-            },
-            "coverage": {
-                "people_profiles": "1B+",
-                "company_profiles": "60M+",
-            },
-        },
-        source_url="https://crustdata.com",
-        confidence=1.0,
-    )

@@ -72,10 +72,17 @@ async def search_semantic_context(
     ranked.sort(key=lambda item: (-item[0], item[1].canonical_name))
     matched_entities = [entity for _, entity in ranked[:4]]
     matched_ids = {entity.id for entity in matched_entities}
+    specific_matched_ids = {
+        entity.id
+        for entity in matched_entities
+        if entity.kind not in {"Project", "Concept"}
+    }
+    relationship_anchor_ids = specific_matched_ids or matched_ids
     connected = [
         relationship
         for relationship in relationships
-        if relationship.subject_id in matched_ids or relationship.object_id in matched_ids
+        if relationship.subject_id in relationship_anchor_ids
+        or relationship.object_id in relationship_anchor_ids
     ]
 
     answer_parts: list[str] = []

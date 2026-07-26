@@ -7,7 +7,12 @@ from synapse.consolidation.models import RawConsolidationPlan
 from synapse.db.models import Episode, EpisodeKind, SourceType
 
 
-def episode(source_id: str, content: str, participants: list[str]) -> Episode:
+def episode(
+    source_id: str,
+    content: str,
+    participants: list[str],
+    details: dict[str, object] | None = None,
+) -> Episode:
     return Episode(
         id=uuid.uuid4(),
         kind=EpisodeKind.SOURCE,
@@ -16,53 +21,106 @@ def episode(source_id: str, content: str, participants: list[str]) -> Episode:
         conversation_id="test",
         content=content,
         participants=participants,
-        details={},
+        details=details or {},
         occurred_at=datetime.now(UTC),
     )
 
 
-def test_semantic_plan_resolves_titan_alias_and_evidence() -> None:
+def test_semantic_plan_merges_generic_assertions_and_evidence() -> None:
     plan = derive_semantic_plan(
         [
             episode(
                 "decision",
-                "Maya: We decided the auth database will be called Titan. "
-                "Atlas API should use it for all new sessions.",
+                "Maya: Orbit Forge offers Prism for the Nova project.",
                 ["Maya", "Jon"],
+                {
+                    "semantic_assertions": {
+                        "entities": [
+                            {
+                                "kind": "Company",
+                                "name": "Orbit Forge",
+                                "aliases": ["Orbit"],
+                            },
+                            {"kind": "Product", "name": "Prism"},
+                            {"kind": "Project", "name": "Nova"},
+                        ],
+                        "relationships": [
+                            {
+                                "subject_kind": "Company",
+                                "subject_name": "Orbit Forge",
+                                "predicate": "offers",
+                                "object_kind": "Product",
+                                "object_name": "Prism",
+                            },
+                            {
+                                "subject_kind": "Product",
+                                "subject_name": "Prism",
+                                "predicate": "evaluated_for",
+                                "object_kind": "Project",
+                                "object_name": "Nova",
+                            },
+                        ],
+                    }
+                },
             ),
             episode(
-                "blocker",
-                "Maya: Atlas API staging is blocked because the session backfill is failing.",
-                ["Maya", "Priya"],
+                "follow-up",
+                "Priya: Prism remains under evaluation for Nova.",
+                ["Priya"],
+                {
+                    "semantic_assertions": {
+                        "relationships": [
+                            {
+                                "subject_kind": "Product",
+                                "subject_name": "Prism",
+                                "predicate": "evaluated_for",
+                                "object_kind": "Project",
+                                "object_name": "Nova",
+                                "confidence": 0.9,
+                            }
+                        ]
+                    }
+                },
             ),
         ]
     )
 
-    titan = next(entity for entity in plan.entities if entity.canonical_name == "Titan")
-    uses = next(
-        relationship for relationship in plan.relationships if relationship.predicate == "uses"
+    company = next(
+        entity for entity in plan.entities if entity.canonical_name == "Orbit Forge"
+    )
+    evaluated = next(
+        relationship
+        for relationship in plan.relationships
+        if relationship.predicate == "evaluated_for"
     )
 
-    assert titan.aliases == ["auth database"]
-    assert uses.evidence_source_ids == ["decision"]
-    assert any(entity.kind == "Blocker" for entity in plan.entities)
+    assert company.aliases == ["Orbit"]
+    assert evaluated.evidence_source_ids == ["decision", "follow-up"]
+    assert {entity.canonical_name for entity in plan.entities} >= {
+        "Orbit Forge",
+        "Prism",
+        "Nova",
+        "Maya",
+        "Jon",
+        "Priya",
+    }
 
 
 def test_llm_plan_rejects_unknown_evidence_and_normalizes_predicates() -> None:
-    episodes = [episode("decision", "Atlas API uses Titan.", ["Maya"])]
+    episodes = [episode("decision", "Prism supports Nova.", ["Maya"])]
     raw_plan = RawConsolidationPlan.model_validate(
         {
             "entities": [
-                {"kind": "System", "canonical_name": "Atlas API"},
-                {"kind": "System", "canonical_name": "Titan"},
+                {"kind": "Product", "canonical_name": "Prism"},
+                {"kind": "Project", "canonical_name": "Nova"},
             ],
             "relationships": [
                 {
-                    "subject_kind": "System",
-                    "subject_name": "Atlas API",
-                    "predicate": "USES DATABASE",
-                    "object_kind": "System",
-                    "object_name": "Titan",
+                    "subject_kind": "Product",
+                    "subject_name": "Prism",
+                    "predicate": "SUPPORTS PROJECT",
+                    "object_kind": "Project",
+                    "object_name": "Nova",
                     "evidence_source_ids": ["decision", "invented"],
                 }
             ],
@@ -71,17 +129,28 @@ def test_llm_plan_rejects_unknown_evidence_and_normalizes_predicates() -> None:
 
     plan = normalize_raw_plan(raw_plan, episodes)
 
-    assert plan.relationships[0].predicate == "uses_database"
+    assert plan.relationships[0].predicate == "supports_project"
     assert plan.relationships[0].evidence_source_ids == ["decision"]
 
 
 def test_adjudication_alias_map_only_targets_canonical_entities() -> None:
     plan = derive_semantic_plan(
-        [episode("decision", "The auth database will be called Titan.", ["Maya"])]
+        [
+            episode(
+                "decision",
+                "Orbit Forge offers Prism.",
+                ["Maya"],
+                {
+                    "semantic_assertions": {
+                        "entities": [{"kind": "Product", "name": "Prism"}]
+                    }
+                },
+            )
+        ]
     )
 
-    apply_alias_map(plan, {"Titan": "authentication store", "invented": "unknown"})
+    apply_alias_map(plan, {"Prism": "Prism AI", "invented": "unknown"})
 
-    titan = next(entity for entity in plan.entities if entity.canonical_name == "Titan")
-    assert "authentication store" in titan.aliases
+    product = next(entity for entity in plan.entities if entity.canonical_name == "Prism")
+    assert "Prism AI" in product.aliases
     assert all(entity.canonical_name != "unknown" for entity in plan.entities)

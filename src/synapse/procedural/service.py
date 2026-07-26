@@ -27,7 +27,14 @@ def classify_recall_family(query: str) -> str:
         return "project_status_briefing"
     if any(
         phrase in normalized
-        for phrase in ("architecture", "database", "decision", "migration", "atlas api", "titan")
+        for phrase in (
+            "architecture",
+            "database",
+            "decision",
+            "migration",
+            "integration",
+            "system design",
+        )
     ):
         return "architecture_context"
     return "knowledge_lookup"

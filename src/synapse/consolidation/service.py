@@ -131,9 +131,7 @@ class ConsolidationService:
                 entity = entity_by_key[entity_spec.key]
                 domain = entity_spec.attributes.get("domain")
                 settings = get_settings()
-                preferred_provider = (
-                    "crustdata" if settings.crustdata_api_key else "crustdata-fixture"
-                )
+                preferred_provider = "crustdata"
                 cached_enrichment = await session.scalar(
                     select(ExternalAttribute).where(
                         ExternalAttribute.entity_id == entity.id,

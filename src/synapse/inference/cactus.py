@@ -7,7 +7,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from synapse.config import Settings, get_settings
-from synapse.domain.models import FastObservation, SourceEvent
+from synapse.domain.models import FastObservation, SourceEvent, semantic_assertions
 
 SYSTEM_PROMPT = """Classify one work event. Return exactly one JSON object with `intent`
 and `salience`. Intent must be one of: record_decision, report_blocker, request_status,
@@ -122,14 +122,14 @@ def assemble_observation(
     confidence: float | None,
     latency_ms: float | None = None,
 ) -> FastObservation:
-    lowered = event.content.lower()
-    known_entities = [
-        entity
-        for entity in ("Titan", "Crustdata", "Synapse", "Atlas API")
-        if entity.lower() in lowered
-    ]
-    if "auth database" in lowered:
-        known_entities.append("auth database")
+    assertions = semantic_assertions(event.metadata)
+    entity_mentions = list(
+        dict.fromkeys(
+            assertion.name
+            for assertion in assertions.entities
+            if assertion.name.casefold() in event.content.casefold()
+        )
+    )
 
     summary = " ".join(event.content.split())
     if len(summary) > 180:
@@ -138,7 +138,7 @@ def assemble_observation(
         summary=summary,
         intent=classification.intent,
         salience=classification.salience,
-        entity_mentions=known_entities,
+        entity_mentions=entity_mentions,
         tags=[event.source_type.value, classification.intent],
         provider=provider,
         confidence=confidence,
