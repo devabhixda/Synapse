@@ -5,9 +5,11 @@ import {
   CircleAlert,
   CloudMoon,
   Database,
+  GitMerge,
   MemoryStick,
   MessageSquareText,
   MoonStar,
+  Network,
   Play,
   RefreshCw,
   Sparkles,
@@ -33,6 +35,37 @@ type Episode = {
 }
 
 type ReplayResult = { processed: number; skipped: number; indexed: number }
+type ConsolidationRun = {
+  id: string
+  status: string
+  stage: string
+  provider: string
+  episode_count: number
+  entity_count: number
+  relationship_count: number
+  graph_diff: Record<string, number>
+  error: string | null
+  created_at: string
+  completed_at: string | null
+}
+type GraphNode = {
+  id: string
+  kind: string
+  name: string
+  aliases: string[]
+  description: string | null
+  attributes: Record<string, string>
+  confidence: number
+}
+type GraphEdge = {
+  id: string
+  source: string
+  target: string
+  predicate: string
+  confidence: number
+  evidence: Array<{ episode_id: string; source_type: string; excerpt: string }>
+}
+type SemanticGraph = { nodes: GraphNode[]; edges: GraphEdge[] }
 type Mode = 'awake' | 'sleep' | 'procedural'
 
 const modes: Array<{ id: Mode; label: string; icon: typeof Activity }> = [
@@ -42,14 +75,20 @@ const modes: Array<{ id: Mode; label: string; icon: typeof Activity }> = [
 ]
 
 async function fetchSnapshot() {
-  const [healthResponse, episodeResponse] = await Promise.all([
+  const [healthResponse, episodeResponse, runsResponse, graphResponse] = await Promise.all([
     fetch('/api/health'),
     fetch('/api/episodes'),
+    fetch('/api/system2/runs'),
+    fetch('/api/system2/graph'),
   ])
-  if (!healthResponse.ok || !episodeResponse.ok) throw new Error('The Synapse API is not ready')
+  if (!healthResponse.ok || !episodeResponse.ok || !runsResponse.ok || !graphResponse.ok) {
+    throw new Error('The Synapse API is not ready')
+  }
   return {
     health: (await healthResponse.json()) as Health,
     episodes: (await episodeResponse.json()) as Episode[],
+    runs: (await runsResponse.json()) as ConsolidationRun[],
+    graph: (await graphResponse.json()) as SemanticGraph,
   }
 }
 
@@ -59,7 +98,10 @@ function App() {
   const [episodes, setEpisodes] = useState<Episode[]>([])
   const [loading, setLoading] = useState(true)
   const [replaying, setReplaying] = useState(false)
+  const [consolidating, setConsolidating] = useState(false)
   const [result, setResult] = useState<ReplayResult | null>(null)
+  const [runs, setRuns] = useState<ConsolidationRun[]>([])
+  const [graph, setGraph] = useState<SemanticGraph>({ nodes: [], edges: [] })
   const [error, setError] = useState<string | null>(null)
 
   async function load() {
@@ -68,6 +110,8 @@ function App() {
       const snapshot = await fetchSnapshot()
       setHealth(snapshot.health)
       setEpisodes(snapshot.episodes)
+      setRuns(snapshot.runs)
+      setGraph(snapshot.graph)
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Unable to load Synapse')
     } finally {
@@ -80,6 +124,8 @@ function App() {
       .then((snapshot) => {
         setHealth(snapshot.health)
         setEpisodes(snapshot.episodes)
+        setRuns(snapshot.runs)
+        setGraph(snapshot.graph)
       })
       .catch((loadError: unknown) => {
         setError(loadError instanceof Error ? loadError.message : 'Unable to load Synapse')
@@ -99,6 +145,22 @@ function App() {
       setError(replayError instanceof Error ? replayError.message : 'Replay failed')
     } finally {
       setReplaying(false)
+    }
+  }
+
+  async function consolidate() {
+    setConsolidating(true)
+    setError(null)
+    try {
+      const response = await fetch('/api/system2/consolidate', { method: 'POST' })
+      if (!response.ok) throw new Error('Sleep cycle failed')
+      await load()
+    } catch (consolidationError) {
+      setError(
+        consolidationError instanceof Error ? consolidationError.message : 'Sleep cycle failed',
+      )
+    } finally {
+      setConsolidating(false)
     }
   }
 
@@ -144,7 +206,16 @@ function App() {
             onRefresh={load}
           />
         )}
-        {mode === 'sleep' && <ComingSoon mode="System 2" icon={CloudMoon} />}
+        {mode === 'sleep' && (
+          <SleepView
+            runs={runs}
+            graph={graph}
+            consolidating={consolidating}
+            error={error}
+            onConsolidate={consolidate}
+            onRefresh={load}
+          />
+        )}
         {mode === 'procedural' && <ComingSoon mode="Procedural memory" icon={BrainCircuit} />}
       </main>
     </div>
@@ -216,6 +287,87 @@ function AwakeView({ episodes, health, loading, replaying, result, error, onRepl
                 <div className={episode.mem0_id ? 'memory-state indexed' : 'memory-state pending'}>{episode.mem0_id ? 'indexed' : 'pending'}</div>
               </article>
             ))}
+          </div>
+        )}
+      </section>
+    </>
+  )
+}
+
+function SleepView({ runs, graph, consolidating, error, onConsolidate, onRefresh }: {
+  runs: ConsolidationRun[]
+  graph: SemanticGraph
+  consolidating: boolean
+  error: string | null
+  onConsolidate: () => Promise<void>
+  onRefresh: () => Promise<void>
+}) {
+  const latest = runs[0]
+  const nodeById = new Map(graph.nodes.map((node) => [node.id, node]))
+  return (
+    <>
+      <section className="control-band sleep-controls">
+        <div className="control-copy">
+          <span className="sleep-indicator"><MoonStar size={15} /> Consolidation</span>
+          <strong>{graph.nodes.length} semantic entities</strong>
+          <span>{graph.edges.length} relationships</span>
+        </div>
+        <div className="actions">
+          <button className="icon-button" type="button" onClick={() => void onRefresh()} title="Refresh"><RefreshCw size={17} /></button>
+          <button className="primary-button sleep-button" type="button" onClick={() => void onConsolidate()} disabled={consolidating}>
+            <CloudMoon size={17} />{consolidating ? 'Consolidating' : 'Start sleep cycle'}
+          </button>
+        </div>
+      </section>
+
+      {error && <div className="error-strip">{error}</div>}
+      {latest && (
+        <section className="run-summary">
+          <div><p className="eyebrow">Latest run</p><strong>{latest.status}</strong><span>{formatTime(latest.created_at)}</span></div>
+          <div><span>Episodes</span><strong>{latest.episode_count}</strong></div>
+          <div><span>Entities</span><strong>{latest.entity_count}</strong></div>
+          <div><span>Relationships</span><strong>{latest.relationship_count}</strong></div>
+          <div className="diff-summary">
+            <GitMerge size={16} />
+            <span>{latest.graph_diff.entities_created ?? 0} new nodes</span>
+            <span>{latest.graph_diff.relationships_created ?? 0} new edges</span>
+          </div>
+        </section>
+      )}
+
+      <section className="semantic-section">
+        <div className="section-heading">
+          <div><p className="eyebrow">Semantic memory</p><h2>Consolidated graph</h2></div>
+          <span className="model-chip">{latest?.provider ?? 'No consolidation run'}</span>
+        </div>
+        {graph.nodes.length === 0 ? (
+          <div className="empty-state"><Network size={28} /><strong>Run a sleep cycle to build the graph</strong></div>
+        ) : (
+          <div className="graph-browser">
+            <div className="entity-list">
+              <div className="pane-heading"><span>Entities</span><strong>{graph.nodes.length}</strong></div>
+              {graph.nodes.map((node) => (
+                <article className="entity-item" key={node.id}>
+                  <span className={`entity-kind kind-${node.kind.toLowerCase()}`}>{node.kind}</span>
+                  <div><strong>{node.name}</strong>{node.aliases.length > 0 && <small>aka {node.aliases.join(', ')}</small>}<p>{node.description}</p></div>
+                  <span className="confidence">{Math.round(node.confidence * 100)}%</span>
+                </article>
+              ))}
+            </div>
+            <div className="edge-list">
+              <div className="pane-heading"><span>Relationships</span><strong>{graph.edges.length}</strong></div>
+              {graph.edges.map((edge) => (
+                <article className="edge-item" key={edge.id}>
+                  <div className="edge-statement">
+                    <strong>{nodeById.get(edge.source)?.name ?? 'Unknown'}</strong>
+                    <span>{edge.predicate.replaceAll('_', ' ')}</span>
+                    <strong>{nodeById.get(edge.target)?.name ?? 'Unknown'}</strong>
+                  </div>
+                  <div className="evidence-count">{edge.evidence.length} evidence {edge.evidence.length === 1 ? 'episode' : 'episodes'}</div>
+                  {edge.evidence[0] && <p>{edge.evidence[0].excerpt}</p>}
+                </article>
+              ))}
+            </div>
           </div>
         )}
       </section>

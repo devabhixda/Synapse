@@ -1,8 +1,10 @@
 # Synapse
 
-Synapse is a working System 1 episodic-memory POC. It replays mocked Slack and meeting
+Synapse is a working fast-and-slow memory POC. System 1 replays mocked Slack and meeting
 events, interprets each event with a local model, persists the original episode and its
-provisional observation, and indexes the episode in Mem0 for semantic retrieval.
+provisional observation, and indexes the episode in Mem0. A user-triggered System 2 sleep
+cycle freezes the source episodes and consolidates them into an evidence-backed semantic
+graph.
 
 ## Current Flow
 
@@ -13,6 +15,9 @@ flowchart LR
 	C --> D[PostgreSQL episodes and observations]
 	D --> E[Mem0 and pgvector index]
 	D --> F[Awake workbench]
+	D --> G[System 2 sleep cycle]
+	G --> H[Entities aliases relationships and evidence]
+	H --> I[Sleep workbench]
 ```
 
 System 1 currently extracts:
@@ -24,8 +29,8 @@ System 1 currently extracts:
 - Retrieval tags
 - Provider confidence and latency
 
-These observations are provisional. The current implementation does not consolidate them
-into a semantic knowledge graph.
+These observations remain provisional. Only System 2 writes canonical entities, aliases,
+relationships, and evidence to the semantic graph.
 
 ## Implemented Components
 
@@ -36,6 +41,10 @@ into a semantic knowledge graph.
 - Alembic migration that creates the PostgreSQL schema and enables pgvector
 - Duplicate-safe ingestion using stable source identifiers
 - Pending-memory reconciliation when an episode exists but has not been indexed
+- Persisted System 2 runs with frozen episode membership, stages, status, and graph diffs
+- Deterministic fixture consolidation into canonical semantic entities and relationships
+- Alias resolution connecting `auth database` to the canonical Titan entity
+- Idempotent graph upserts and relationship-to-episode evidence links
 - Worker container with database connectivity for background-process scaffolding
 
 ### Local Inference
@@ -63,7 +72,10 @@ into a semantic knowledge graph.
 - PostgreSQL and Cactus status indicators
 - Mock replay and refresh controls
 - Mem0 indexed/pending state per episode
-- Placeholder navigation for Sleep and Procedural views; those views have no behavior yet
+- Sleep-cycle control and persisted latest-run summary
+- Semantic entity browser with aliases, descriptions, kinds, and confidence
+- Relationship browser with source/target entities and episode evidence
+- Placeholder navigation for Procedural memory; that view has no behavior yet
 
 ## Mock Dataset
 
@@ -76,7 +88,9 @@ The deterministic fixture contains five episodes covering:
 - A proposal to use Crustdata during memory consolidation
 
 Replaying the fixture multiple times does not duplicate episodes. With Cactus running, all
-five episodes are indexed in Mem0/pgvector.
+five episodes are indexed in Mem0/pgvector. A sleep cycle currently produces 12 canonical
+entities, 7 relationships, the Titan alias, and 8 relationship evidence links. Repeating
+the sleep cycle updates the existing graph without duplicating it.
 
 ## Run Locally
 
@@ -105,6 +119,12 @@ make up
 make replay
 ```
 
+Open the Sleep view and select **Start sleep cycle**, or trigger it directly:
+
+```sh
+curl --fail --request POST http://localhost:3000/api/system2/consolidate
+```
+
 Open:
 
 - Workbench: http://localhost:3000
@@ -123,6 +143,9 @@ pending Mem0 indexing. Running the replay again after Cactus starts reconciles t
 | `GET` | `/api/config` | Public model, embedding dimension, and retrieval threshold |
 | `GET` | `/api/episodes` | Latest persisted episodes and Mem0 indexing state |
 | `POST` | `/api/demo/replay` | Idempotently process and reconcile the mock event stream |
+| `POST` | `/api/system2/consolidate` | Run a persisted sleep cycle over a frozen episode snapshot |
+| `GET` | `/api/system2/runs` | List recent consolidation runs and graph diffs |
+| `GET` | `/api/system2/graph` | Return canonical entities, aliases, relationships, and evidence |
 
 ## Docker Services
 
@@ -162,9 +185,12 @@ The current implementation passes:
 - Docker Compose health checks
 - Duplicate replay and pending-memory reconciliation
 - Native Gemma chat and embedding smoke tests
+- System 2 migration, extraction, alias, evidence, and API schema tests
+- Live consolidation and graph idempotency checks
 
 ## Current Boundaries
 
-The repository does not yet implement semantic graph consolidation, Crustdata API calls,
+System 2 currently uses a deterministic extractor tailored to the mock dataset; it does not
+yet use an LLM extraction pass. The repository does not implement Crustdata API calls,
 episodic-to-knowledge-base fallback retrieval, pattern detection, procedural skill
-synthesis, or functional MCP tools. The Sleep and Procedural UI entries are placeholders.
+synthesis, or functional MCP tools. The Procedural UI entry remains a placeholder.
