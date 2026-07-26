@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import {
   Activity,
   BrainCircuit,
+  Check,
   CircleAlert,
   CloudMoon,
   Database,
@@ -12,7 +13,10 @@ import {
   Network,
   Play,
   RefreshCw,
+  ScanSearch,
+  ShieldCheck,
   Sparkles,
+  X,
 } from 'lucide-react'
 import './App.css'
 
@@ -73,6 +77,32 @@ type GraphEdge = {
   evidence: Array<{ episode_id: string; source_type: string; excerpt: string }>
 }
 type SemanticGraph = { nodes: GraphNode[]; edges: GraphEdge[] }
+type WorkflowPattern = {
+  id: string
+  key: string
+  name: string
+  description: string
+  status: string
+  occurrence_count: number
+  confidence: number
+  evidence_recall_ids: string[]
+  first_seen_at: string
+  last_seen_at: string
+}
+type SkillSpec = {
+  id: string
+  pattern_id: string
+  name: string
+  version: number
+  status: string
+  purpose: string
+  triggers: string[]
+  required_queries: string[]
+  steps: string[]
+  guardrails: string[]
+  expected_output: Record<string, unknown>
+  confidence: number
+}
 type Mode = 'awake' | 'sleep' | 'procedural'
 
 const modes: Array<{ id: Mode; label: string; icon: typeof Activity }> = [
@@ -82,13 +112,15 @@ const modes: Array<{ id: Mode; label: string; icon: typeof Activity }> = [
 ]
 
 async function fetchSnapshot() {
-  const [healthResponse, episodeResponse, runsResponse, graphResponse] = await Promise.all([
+  const [healthResponse, episodeResponse, runsResponse, graphResponse, patternsResponse, skillsResponse] = await Promise.all([
     fetch('/api/health'),
     fetch('/api/episodes'),
     fetch('/api/system2/runs'),
     fetch('/api/system2/graph'),
+    fetch('/api/procedural/patterns'),
+    fetch('/api/procedural/skills'),
   ])
-  if (!healthResponse.ok || !episodeResponse.ok || !runsResponse.ok || !graphResponse.ok) {
+  if (!healthResponse.ok || !episodeResponse.ok || !runsResponse.ok || !graphResponse.ok || !patternsResponse.ok || !skillsResponse.ok) {
     throw new Error('The Synapse API is not ready')
   }
   return {
@@ -96,6 +128,8 @@ async function fetchSnapshot() {
     episodes: (await episodeResponse.json()) as Episode[],
     runs: (await runsResponse.json()) as ConsolidationRun[],
     graph: (await graphResponse.json()) as SemanticGraph,
+    patterns: (await patternsResponse.json()) as WorkflowPattern[],
+    skills: (await skillsResponse.json()) as SkillSpec[],
   }
 }
 
@@ -106,9 +140,12 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [replaying, setReplaying] = useState(false)
   const [consolidating, setConsolidating] = useState(false)
+  const [detecting, setDetecting] = useState(false)
   const [result, setResult] = useState<ReplayResult | null>(null)
   const [runs, setRuns] = useState<ConsolidationRun[]>([])
   const [graph, setGraph] = useState<SemanticGraph>({ nodes: [], edges: [] })
+  const [patterns, setPatterns] = useState<WorkflowPattern[]>([])
+  const [skills, setSkills] = useState<SkillSpec[]>([])
   const [error, setError] = useState<string | null>(null)
 
   async function load() {
@@ -119,6 +156,8 @@ function App() {
       setEpisodes(snapshot.episodes)
       setRuns(snapshot.runs)
       setGraph(snapshot.graph)
+      setPatterns(snapshot.patterns)
+      setSkills(snapshot.skills)
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Unable to load Synapse')
     } finally {
@@ -133,6 +172,8 @@ function App() {
         setEpisodes(snapshot.episodes)
         setRuns(snapshot.runs)
         setGraph(snapshot.graph)
+        setPatterns(snapshot.patterns)
+        setSkills(snapshot.skills)
       })
       .catch((loadError: unknown) => {
         setError(loadError instanceof Error ? loadError.message : 'Unable to load Synapse')
@@ -168,6 +209,35 @@ function App() {
       )
     } finally {
       setConsolidating(false)
+    }
+  }
+
+  async function detectPatterns() {
+    setDetecting(true)
+    setError(null)
+    try {
+      const response = await fetch('/api/procedural/detect', { method: 'POST' })
+      if (!response.ok) throw new Error('Pattern detection failed')
+      await load()
+    } catch (detectionError) {
+      setError(detectionError instanceof Error ? detectionError.message : 'Pattern detection failed')
+    } finally {
+      setDetecting(false)
+    }
+  }
+
+  async function updateSkillStatus(skillId: string, status: string) {
+    setError(null)
+    try {
+      const response = await fetch(`/api/procedural/skills/${skillId}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status }),
+      })
+      if (!response.ok) throw new Error('Skill review failed')
+      await load()
+    } catch (reviewError) {
+      setError(reviewError instanceof Error ? reviewError.message : 'Skill review failed')
     }
   }
 
@@ -223,7 +293,17 @@ function App() {
             onRefresh={load}
           />
         )}
-        {mode === 'procedural' && <ComingSoon mode="Procedural memory" icon={BrainCircuit} />}
+        {mode === 'procedural' && (
+          <ProceduralView
+            patterns={patterns}
+            skills={skills}
+            detecting={detecting}
+            error={error}
+            onDetect={detectPatterns}
+            onRefresh={load}
+            onStatus={updateSkillStatus}
+          />
+        )}
       </main>
     </div>
   )
@@ -382,8 +462,77 @@ function SleepView({ runs, graph, consolidating, error, onConsolidate, onRefresh
   )
 }
 
-function ComingSoon({ mode, icon: Icon }: { mode: string; icon: typeof Activity }) {
-  return <section className="coming-soon"><Icon size={34} /><p className="eyebrow">Next implementation slice</p><h2>{mode}</h2></section>
+function ProceduralView({ patterns, skills, detecting, error, onDetect, onRefresh, onStatus }: {
+  patterns: WorkflowPattern[]
+  skills: SkillSpec[]
+  detecting: boolean
+  error: string | null
+  onDetect: () => Promise<void>
+  onRefresh: () => Promise<void>
+  onStatus: (skillId: string, status: string) => Promise<void>
+}) {
+  const patternById = new Map(patterns.map((pattern) => [pattern.id, pattern]))
+  return (
+    <>
+      <section className="control-band procedural-controls">
+        <div className="control-copy">
+          <span className="procedural-indicator"><BrainCircuit size={15} /> Pattern synthesis</span>
+          <strong>{patterns.length} workflow patterns</strong>
+          <span>{skills.filter((skill) => skill.status === 'approved').length} approved skills</span>
+        </div>
+        <div className="actions">
+          <button className="icon-button" type="button" onClick={() => void onRefresh()} title="Refresh"><RefreshCw size={17} /></button>
+          <button className="primary-button procedural-button" type="button" onClick={() => void onDetect()} disabled={detecting}>
+            <ScanSearch size={17} />{detecting ? 'Detecting' : 'Detect patterns'}
+          </button>
+        </div>
+      </section>
+      {error && <div className="error-strip">{error}</div>}
+      <section className="procedural-section">
+        <div className="section-heading">
+          <div><p className="eyebrow">Procedural memory</p><h2>Observed workflows</h2></div>
+          <span className="model-chip">minimum 2 occurrences</span>
+        </div>
+        {skills.length === 0 ? (
+          <div className="empty-state"><BrainCircuit size={28} /><strong>Repeat recall workflows, then detect patterns</strong></div>
+        ) : (
+          <div className="skill-browser">
+            {skills.map((skill) => {
+              const pattern = patternById.get(skill.pattern_id)
+              return (
+                <article className="skill-panel" key={skill.id}>
+                  <header className="skill-header">
+                    <div>
+                      <span className={`skill-status status-${skill.status}`}>{skill.status}</span>
+                      <h3>{skill.name.replaceAll('_', ' ')}</h3>
+                      <p>{skill.purpose}</p>
+                    </div>
+                    <div className="skill-metrics">
+                      <span>v{skill.version}</span>
+                      <strong>{pattern?.occurrence_count ?? 0} recalls</strong>
+                      <span>{Math.round(skill.confidence * 100)}% confidence</span>
+                    </div>
+                  </header>
+                  <div className="skill-content">
+                    <section><h4>Triggers</h4><ul>{skill.triggers.map((item) => <li key={item}>{item}</li>)}</ul></section>
+                    <section><h4>Workflow</h4><ol>{skill.steps.map((item) => <li key={item}>{item}</li>)}</ol></section>
+                    <section><h4><ShieldCheck size={14} /> Guardrails</h4><ul>{skill.guardrails.map((item) => <li key={item}>{item}</li>)}</ul></section>
+                  </div>
+                  <footer className="skill-actions">
+                    <span>{pattern?.evidence_recall_ids.length ?? 0} recall events as evidence</span>
+                    <div>
+                      <button type="button" className="reject-button" onClick={() => void onStatus(skill.id, 'rejected')}><X size={15} /> Reject</button>
+                      <button type="button" className="approve-button" onClick={() => void onStatus(skill.id, 'approved')}><Check size={15} /> Approve</button>
+                    </div>
+                  </footer>
+                </article>
+              )
+            })}
+          </div>
+        )}
+      </section>
+    </>
+  )
 }
 
 function formatTime(value: string) {

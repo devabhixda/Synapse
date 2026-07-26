@@ -44,7 +44,32 @@ button { letter-spacing: 0; }
 .memory-state.pending { background: #eee9dc; color: #776a4e; }
 .memory-state.indexed { background: #e1efdf; color: #356032; }
 .empty-state { min-height: 240px; display: grid; place-content: center; place-items: center; gap: 10px; color: var(--muted); border-top: 1px solid var(--line); }
-.coming-soon { min-height: calc(100vh - 85px); display: grid; place-content: center; place-items: center; gap: 10px; color: var(--muted); }
+.procedural-controls { background: #f3f0e9; }
+.procedural-indicator { display: flex; align-items: center; gap: 7px; color: #5e4d32; font-family: var(--mono); }
+.procedural-button { background: #4b3e2a; border-color: #4b3e2a; }
+.procedural-section { padding: 30px 34px 50px; }
+.skill-browser { display: grid; gap: 16px; }
+.skill-panel { border: 1px solid var(--line-strong); background: #fff; }
+.skill-header { display: flex; justify-content: space-between; gap: 20px; padding: 18px; border-bottom: 1px solid var(--line); background: #faf9f4; }
+.skill-header h3 { margin: 8px 0 5px; font-size: 17px; text-transform: capitalize; }
+.skill-header p { margin: 0; max-width: 720px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.skill-status { display: inline-flex; padding: 4px 7px; border-radius: 3px; font: 700 9px/1 var(--mono); text-transform: uppercase; }
+.status-candidate { background: #eee9dc; color: #776a4e; }
+.status-approved { background: #e1efdf; color: #356032; }
+.status-rejected { background: #f7e3df; color: #8c4439; }
+.skill-metrics { display: grid; align-content: start; justify-items: end; gap: 5px; white-space: nowrap; color: var(--muted); font: 500 10px/1.3 var(--mono); }
+.skill-metrics strong { color: var(--ink); }
+.skill-content { display: grid; grid-template-columns: .9fr 1.25fr 1fr; }
+.skill-content section { padding: 16px 18px; border-right: 1px solid var(--line); }
+.skill-content section:last-child { border-right: 0; }
+.skill-content h4 { display: flex; align-items: center; gap: 6px; margin: 0 0 10px; font: 750 11px/1 var(--mono); text-transform: uppercase; }
+.skill-content ul, .skill-content ol { margin: 0; padding-left: 18px; color: #4d5149; font-size: 11px; line-height: 1.55; }
+.skill-content li + li { margin-top: 5px; }
+.skill-actions { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 14px; border-top: 1px solid var(--line); color: var(--muted); font: 600 10px/1 var(--mono); }
+.skill-actions > div { display: flex; gap: 7px; }
+.skill-actions button { height: 32px; display: flex; align-items: center; gap: 6px; border-radius: 4px; padding: 0 10px; cursor: pointer; font-size: 11px; font-weight: 700; }
+.reject-button { border: 1px solid #d8b8b1; background: #fff; color: #85473e; }
+.approve-button { border: 1px solid #355e3d; background: #3e7048; color: #fff; }
 .sleep-controls { background: #f1f1e9; }
 .sleep-indicator { display: flex; align-items: center; gap: 7px; color: #3f5144; font-family: var(--mono); }
 .sleep-button { background: #263c30; border-color: #263c30; }
@@ -98,4 +123,10 @@ button { letter-spacing: 0; }
   .semantic-section { padding: 26px 18px 36px; }
   .graph-browser { grid-template-columns: 1fr; }
   .entity-list { border-right: 0; border-bottom: 1px solid var(--line-strong); }
+  .procedural-section { padding: 26px 18px 36px; }
+  .skill-header { flex-direction: column; }
+  .skill-metrics { justify-items: start; }
+  .skill-content { grid-template-columns: 1fr; }
+  .skill-content section { border-right: 0; border-bottom: 1px solid var(--line); }
+  .skill-actions { align-items: flex-start; flex-direction: column; }
 }
