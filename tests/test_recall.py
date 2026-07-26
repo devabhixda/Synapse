@@ -2,7 +2,7 @@ import uuid
 from datetime import UTC, datetime
 
 from synapse.db.models import Episode, EpisodeKind, SourceType
-from synapse.recall.service import episode_citations
+from synapse.recall.service import episode_citations, needs_substantive_update
 
 
 def test_retrieval_episode_preserves_original_citations() -> None:
@@ -35,9 +35,20 @@ def test_retrieval_episode_preserves_original_citations() -> None:
     assert citations[0].id == original_id
 
 
+def test_substantive_status_queries_exclude_request_only_episodes() -> None:
+    assert needs_substantive_update("Give me the current migration status and blockers")
+    assert needs_substantive_update("What are the next actions and owners?")
+    assert not needs_substantive_update("Who requested the latest status update?")
+
+
 async def test_mcp_lists_recall_and_episode_tools() -> None:
     from synapse.mcp.server import mcp
 
     tools = await mcp.list_tools()
 
-    assert {tool.name for tool in tools} == {"recall", "get_episode"}
+    assert {tool.name for tool in tools} == {
+        "recall",
+        "get_episode",
+        "list_skill_specs",
+        "get_skill_spec",
+    }

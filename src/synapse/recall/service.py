@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from synapse.db.models import Episode, EpisodeKind, RecallEvent, SourceType
+from synapse.db.models import Episode, EpisodeKind, IntentObservation, RecallEvent, SourceType
 from synapse.memory.mem0_store import Mem0EpisodeStore
 from synapse.recall.answerability import EpisodeAnswerabilityJudge
 from synapse.recall.models import RecallCitation, RecallResult
@@ -16,6 +16,16 @@ from synapse.semantic.repository import search_semantic_context
 
 def normalize_query(value: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9]+", " ", value.casefold()).split())
+
+
+def needs_substantive_update(query: str) -> bool:
+    normalized = normalize_query(query)
+    if any(phrase in normalized for phrase in ("who asked", "who requested")):
+        return False
+    return any(
+        term in normalized
+        for term in ("status", "blocker", "next action", "owner", "readiness")
+    )
 
 
 class RecallService:
@@ -34,7 +44,7 @@ class RecallService:
             raise ValueError("Recall query cannot be empty")
 
         memories = await self.memory_store.search(query)
-        candidates = await self._durable_candidates(memories, session)
+        candidates = await self._durable_candidates(query, memories, session)
         selection = await self.judge.select(
             query,
             [
@@ -108,7 +118,7 @@ class RecallService:
         return result
 
     async def _durable_candidates(
-        self, memories: list[dict[str, Any]], session: AsyncSession
+        self, query: str, memories: list[dict[str, Any]], session: AsyncSession
     ) -> list[tuple[Episode, dict[str, Any]]]:
         candidates: list[tuple[Episode, dict[str, Any]]] = []
         for memory in memories:
@@ -121,6 +131,23 @@ class RecallService:
             episode = await session.get(Episode, episode_id)
             if episode is not None and episode.stale_at is None:
                 candidates.append((episode, memory))
+
+        if needs_substantive_update(query) and candidates:
+            request_episode_ids = set(
+                await session.scalars(
+                    select(IntentObservation.episode_id).where(
+                        IntentObservation.episode_id.in_(
+                            episode.id for episode, _ in candidates
+                        ),
+                        IntentObservation.intent == "request_status",
+                    )
+                )
+            )
+            candidates = [
+                (episode, memory)
+                for episode, memory in candidates
+                if episode.id not in request_episode_ids
+            ]
         return candidates
 
     async def _write_back(
