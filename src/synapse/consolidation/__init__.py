@@ -1,0 +1,1 @@
+"""System 2 semantic consolidation."""

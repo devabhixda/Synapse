@@ -3,7 +3,17 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import DateTime, Enum, Float, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import (
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
@@ -99,3 +109,140 @@ class RecallEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
+
+
+class ConsolidationRun(Base):
+    __tablename__ = "consolidation_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
+    stage: Mapped[str] = mapped_column(String(64), default="queued")
+    provider: Mapped[str] = mapped_column(String(80), default="deterministic")
+    episode_count: Mapped[int] = mapped_column(Integer, default=0)
+    entity_count: Mapped[int] = mapped_column(Integer, default=0)
+    relationship_count: Mapped[int] = mapped_column(Integer, default=0)
+    graph_diff: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    snapshots: Mapped[list["ConsolidationEpisode"]] = relationship(
+        back_populates="run", cascade="all, delete-orphan"
+    )
+
+
+class ConsolidationEpisode(Base):
+    __tablename__ = "consolidation_episodes"
+    __table_args__ = (
+        UniqueConstraint("run_id", "episode_id", name="uq_consolidation_episode"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("consolidation_runs.id", ondelete="CASCADE"), index=True
+    )
+    episode_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("episodes.id", ondelete="CASCADE"), index=True
+    )
+
+    run: Mapped[ConsolidationRun] = relationship(back_populates="snapshots")
+    episode: Mapped[Episode] = relationship()
+
+
+class SemanticEntity(Base):
+    __tablename__ = "semantic_entities"
+    __table_args__ = (
+        UniqueConstraint("kind", "normalized_name", name="uq_semantic_entity_identity"),
+        Index("ix_semantic_entities_name", "normalized_name"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(String(64))
+    canonical_name: Mapped[str] = mapped_column(String(255))
+    normalized_name: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    aliases: Mapped[list["EntityAlias"]] = relationship(
+        back_populates="entity", cascade="all, delete-orphan"
+    )
+
+
+class EntityAlias(Base):
+    __tablename__ = "entity_aliases"
+    __table_args__ = (
+        UniqueConstraint("normalized_alias", name="uq_entity_alias_normalized"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("semantic_entities.id", ondelete="CASCADE"), index=True
+    )
+    alias: Mapped[str] = mapped_column(String(255))
+    normalized_alias: Mapped[str] = mapped_column(String(255), index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+
+    entity: Mapped[SemanticEntity] = relationship(back_populates="aliases")
+
+
+class SemanticRelationship(Base):
+    __tablename__ = "semantic_relationships"
+    __table_args__ = (
+        UniqueConstraint(
+            "subject_id", "predicate", "object_id", name="uq_semantic_relationship"
+        ),
+        Index("ix_semantic_relationships_predicate", "predicate"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    subject_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("semantic_entities.id", ondelete="CASCADE"), index=True
+    )
+    predicate: Mapped[str] = mapped_column(String(120))
+    object_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("semantic_entities.id", ondelete="CASCADE"), index=True
+    )
+    attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    subject: Mapped[SemanticEntity] = relationship(foreign_keys=[subject_id])
+    object: Mapped[SemanticEntity] = relationship(foreign_keys=[object_id])
+    evidence: Mapped[list["RelationshipEvidence"]] = relationship(
+        back_populates="semantic_relationship", cascade="all, delete-orphan"
+    )
+
+
+class RelationshipEvidence(Base):
+    __tablename__ = "relationship_evidence"
+    __table_args__ = (
+        UniqueConstraint("relationship_id", "episode_id", name="uq_relationship_evidence"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    relationship_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("semantic_relationships.id", ondelete="CASCADE"), index=True
+    )
+    episode_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("episodes.id", ondelete="CASCADE"), index=True
+    )
+    excerpt: Mapped[str] = mapped_column(Text)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+
+    semantic_relationship: Mapped[SemanticRelationship] = relationship(back_populates="evidence")
+    episode: Mapped[Episode] = relationship()

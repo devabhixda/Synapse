@@ -46,7 +46,7 @@ class CactusInterpreter:
             parsed = parse_json_object(content)
             return FastObservation(
                 **parsed,
-                provider="cactus-qwen",
+                provider="cactus-gemma",
                 confidence=body.get("confidence"),
                 latency_ms=(time.perf_counter() - started) * 1000,
             )
