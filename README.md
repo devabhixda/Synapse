@@ -28,6 +28,10 @@ flowchart LR
 	K --> P[Serve semantic answer]
 	P --> Q[Create retrieval episode]
 	Q --> E
+	Q --> R[Recall behavior patterns]
+	R --> S[Versioned skill candidate]
+	S --> T[User review]
+	T --> U[Approved MCP skill spec]
 ```
 
 System 1 currently produces:
@@ -62,6 +66,9 @@ relationships, and evidence to the semantic graph.
 - Evidence-backed semantic fallback and explicit total misses
 - Retrieval-episode write-back into Mem0 for future paraphrased queries
 - Recall-event telemetry recording origin, selected IDs, scores, and latency
+- Recall-query classification into stable workflow families
+- Repeated-workflow detection with an explicit minimum occurrence threshold
+- Declarative skill synthesis with immutable revisions and review status
 - Worker container with database connectivity for background-process scaffolding
 
 ### MCP
@@ -69,6 +76,7 @@ relationships, and evidence to the semantic graph.
 - Stable MCP Python SDK v1 server over stdio
 - Typed `recall` tool using the mandatory episodic-first learning loop
 - Typed `get_episode` tool for citation inspection
+- Typed `list_skill_specs` and `get_skill_spec` tools exposing approved workflows only
 - Docker Compose launch through `.vscode/mcp.json`
 - Workspace instructions requiring coding agents to use `recall` for organizational context
 
@@ -104,25 +112,29 @@ relationships, and evidence to the semantic graph.
 - Semantic entity browser with aliases, descriptions, kinds, and confidence
 - Relationship browser with source/target entities and episode evidence
 - External enrichment provider shown on enriched entities
-- Placeholder navigation for Procedural memory; that view has no behavior yet
+- Procedural pattern detection over real recall history
+- Skill workflow, trigger, guardrail, confidence, and evidence inspection
+- Candidate approval and rejection controls
 
 ## Mock Dataset
 
-The deterministic fixture contains five episodes covering:
+The deterministic fixture contains 14 chronological Slack and meeting episodes covering:
 
 - The decision to name the authentication database Titan
-- Titan and Atlas API migration context across Slack and a meeting
-- A project-status request
-- A session-backfill blocker
-- A proposal to use Crustdata during memory consolidation
+- Titan and Atlas API migration context, repository location, and dual-write rollout
+- Security approval, KMS encryption, token TTL, and rollback constraints
+- A session-backfill blocker, root cause, repair owner, and resolution
+- Repeated project-status requests with owners, readiness, and next actions
+- A phased production rollout and migration retrospective
+- A proposal and policy decision for Crustdata enrichment during memory consolidation
 
 These fixture events are the only source information ingested by System 1. Crustdata is
 called only from System 2 after a `Company` entity and domain have been resolved.
 
 Replaying the fixture multiple times does not duplicate episodes. With Cactus running, all
-five episodes are indexed in Mem0/pgvector. A sleep cycle currently produces 12 canonical
-entities, 7 relationships, the Titan alias, and 8 relationship evidence links. Repeating
-the sleep cycle updates the existing graph without duplicating it. With
+14 episodes are indexed in Mem0/pgvector. A sleep cycle currently produces 22 canonical
+entities, 20 relationships, and evidence-backed aliases and attributes. Repeating the
+sleep cycle updates the existing graph without duplicating it. With
 `CRUSTDATA_API_KEY` configured, the Crustdata company node receives a live company profile;
 without a key, an equivalent fixture payload keeps the demo deterministic.
 
@@ -188,6 +200,8 @@ Available tools:
 
 - `recall(query)` runs the episodic-first learning loop and returns structured citations.
 - `get_episode(episode_id)` inspects one durable episode cited by a recall result.
+- `list_skill_specs()` lists approved procedural workflows.
+- `get_skill_spec(name)` returns one approved workflow with steps and guardrails.
 
 Example agent prompts:
 
@@ -209,6 +223,19 @@ After changing MCP code, use **MCP: List Servers → synapse-memory → Restart 
 the server is not listed, run **Developer: Reload Window**. Running the Compose MCP command
 manually will appear idle because the process is waiting for protocol messages on stdin.
 
+### Build Procedural Memory
+
+Repeat a recall workflow at least twice, then use the Procedural view's **Detect patterns**
+button or call:
+
+```sh
+curl --fail --request POST http://localhost:3000/api/procedural/detect
+```
+
+Review the generated skill in the Procedural view. Candidate and rejected skills remain
+private to the workbench; approving a skill makes it visible to `list_skill_specs` and
+`get_skill_spec` after the MCP server is restarted.
+
 Open:
 
 - Workbench: http://localhost:3000
@@ -229,6 +256,10 @@ explicitly desired.
 | `GET` | `/api/episodes` | Latest persisted episodes and Mem0 indexing state |
 | `POST` | `/api/demo/replay` | Idempotently process and reconcile the mock event stream |
 | `POST` | `/api/recall` | Search episodes first, fall back to graph, and learn from fallback |
+| `POST` | `/api/procedural/detect` | Detect repeated recall workflows and synthesize skills |
+| `GET` | `/api/procedural/patterns` | List observed workflow patterns and evidence IDs |
+| `GET` | `/api/procedural/skills` | List skill candidates, versions, and review states |
+| `POST` | `/api/procedural/skills/{id}/status` | Approve, reject, or reset a skill candidate |
 | `POST` | `/api/system2/consolidate` | Run a persisted sleep cycle over a frozen episode snapshot |
 | `GET` | `/api/system2/runs` | List recent consolidation runs and graph diffs |
 | `GET` | `/api/system2/graph` | Return canonical entities, aliases, relationships, and evidence |
@@ -280,12 +311,16 @@ The current implementation passes:
 - Episodic miss → semantic fallback → retrieval-episode write-back
 - Paraphrased episodic hit with preserved original citations
 - MCP initialize, tool discovery, and structured `recall` invocation over stdio
+- Idempotent pattern detection and immutable skill revision checks
+- Candidate approval synchronization between patterns and skills
+- Approved-only procedural skill discovery through MCP
 
 ## Current Boundaries
 
 System 2 uses deterministic evidence candidate generation tailored to the mock dataset,
 then uses Gemma to adjudicate ambiguous aliases. The installed E2B model is not used to
 generate the complete nested graph because its long structured output is unreliable. The
-repository does not yet implement pattern detection or procedural skill synthesis. The
-Procedural UI entry remains a placeholder. MCP currently exposes recall and citation
-inspection only; coding actions remain with the VS Code agent.
+current procedural templates cover company research, architecture context, and project
+status briefing families. Pattern classification and synthesis are deterministic and
+transparent rather than LLM-generated. Synapse exposes approved guidance only; coding
+actions remain with the VS Code agent.
