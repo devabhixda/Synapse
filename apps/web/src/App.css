@@ -63,6 +63,7 @@ button { letter-spacing: 0; }
 .entity-item > div { min-width: 0; }
 .entity-item strong { display: block; font-size: 13px; }
 .entity-item small { display: block; margin-top: 3px; color: #56705b; font-size: 10px; }
+.entity-item .external-source { color: #745c2e; }
 .entity-item p, .edge-item p { margin: 5px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
 .entity-kind { display: inline-flex; width: fit-content; padding: 4px 6px; border-radius: 3px; background: #eceee7; color: #5d6358; font: 700 9px/1 var(--mono); text-transform: uppercase; }
 .kind-system { background: #e4ebfb; color: #425b91; }

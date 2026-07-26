@@ -4,7 +4,8 @@ Synapse is a working fast-and-slow memory POC. System 1 replays mocked Slack and
 events, interprets each event with a local model, persists the original episode and its
 provisional observation, and indexes the episode in Mem0. A user-triggered System 2 sleep
 cycle freezes the source episodes and consolidates them into an evidence-backed semantic
-graph.
+graph. System 1 source information comes only from the deterministic mock Slack and meeting
+adapters.
 
 ## Current Flow
 
@@ -16,18 +17,20 @@ flowchart LR
 	D --> E[Mem0 and pgvector index]
 	D --> F[Awake workbench]
 	D --> G[System 2 sleep cycle]
-	G --> H[Entities aliases relationships and evidence]
-	H --> I[Sleep workbench]
+	G --> H[Deterministic evidence candidates]
+	H --> I[Gemma alias adjudication]
+	I --> J[Crustdata company enrichment]
+	J --> K[Semantic graph and Sleep workbench]
 ```
 
-System 1 currently extracts:
+System 1 currently produces:
 
-- A compact episode summary
-- A short intent label
-- Salience from 0 to 1
-- Mentioned entities
-- Retrieval tags
-- Provider confidence and latency
+- A Gemma-classified intent label
+- Gemma-classified salience from 0 to 1
+- An event-local compact summary assembled without cross-event inference
+- Explicit entity mentions found in the event
+- Source and intent retrieval tags
+- Provider and latency metadata
 
 These observations remain provisional. Only System 2 writes canonical entities, aliases,
 relationships, and evidence to the semantic graph.
@@ -44,16 +47,21 @@ relationships, and evidence to the semantic graph.
 - Persisted System 2 runs with frozen episode membership, stages, status, and graph diffs
 - Deterministic fixture consolidation into canonical semantic entities and relationships
 - Alias resolution connecting `auth database` to the canonical Titan entity
+- Gemma adjudication of evidence-backed alias candidates with deterministic fallback
+- Crustdata domain identification and selected company-profile enrichment
+- Provider-specific 24-hour enrichment cache
 - Idempotent graph upserts and relationship-to-episode evidence links
 - Worker container with database connectivity for background-process scaffolding
 
 ### Local Inference
 
 - Cactus 2.0.1 running natively on macOS with Apple Metal
-- `google/gemma-4-E2B-it` for System 1 structured interpretation
+- `google/gemma-4-E2B-it` for compact System 1 intent and salience classification
+- Event-local assembly for summaries, explicit mentions, and tags to avoid brittle long JSON
 - The same Gemma server for 1,536-dimensional embeddings
 - OpenAI-compatible chat, model, and embedding endpoints on port `8080`
-- Deterministic interpretation fallback when Cactus is unavailable
+- Fail-closed `auto` mode: invalid or unavailable Cactus does not store a fallback observation
+- Explicit deterministic interpretation only with `INFERENCE_MODE=fake`
 
 ### Memory and Storage
 
@@ -64,6 +72,7 @@ relationships, and evidence to the semantic graph.
 - Mem0 hybrid semantic, keyword, and entity-aware retrieval support
 - In-memory Mem0 operation history; durable application state remains in PostgreSQL
 - Persistent PostgreSQL Docker volume
+- External semantic attributes with provider, field group, confidence, source URL, and time
 
 ### Workbench
 
@@ -75,6 +84,7 @@ relationships, and evidence to the semantic graph.
 - Sleep-cycle control and persisted latest-run summary
 - Semantic entity browser with aliases, descriptions, kinds, and confidence
 - Relationship browser with source/target entities and episode evidence
+- External enrichment provider shown on enriched entities
 - Placeholder navigation for Procedural memory; that view has no behavior yet
 
 ## Mock Dataset
@@ -87,10 +97,15 @@ The deterministic fixture contains five episodes covering:
 - A session-backfill blocker
 - A proposal to use Crustdata during memory consolidation
 
+These fixture events are the only source information ingested by System 1. Crustdata is
+called only from System 2 after a `Company` entity and domain have been resolved.
+
 Replaying the fixture multiple times does not duplicate episodes. With Cactus running, all
 five episodes are indexed in Mem0/pgvector. A sleep cycle currently produces 12 canonical
 entities, 7 relationships, the Titan alias, and 8 relationship evidence links. Repeating
-the sleep cycle updates the existing graph without duplicating it.
+the sleep cycle updates the existing graph without duplicating it. With
+`CRUSTDATA_API_KEY` configured, the Crustdata company node receives a live company profile;
+without a key, an equivalent fixture payload keeps the demo deterministic.
 
 ## Run Locally
 
@@ -186,11 +201,16 @@ The current implementation passes:
 - Duplicate replay and pending-memory reconciliation
 - Native Gemma chat and embedding smoke tests
 - System 2 migration, extraction, alias, evidence, and API schema tests
+- Gemma alias-adjudication and fallback tests
+- Crustdata fixture and live-response parser tests
 - Live consolidation and graph idempotency checks
+- Live Crustdata enrichment and cache verification
 
 ## Current Boundaries
 
-System 2 currently uses a deterministic extractor tailored to the mock dataset; it does not
-yet use an LLM extraction pass. The repository does not implement Crustdata API calls,
-episodic-to-knowledge-base fallback retrieval, pattern detection, procedural skill
-synthesis, or functional MCP tools. The Procedural UI entry remains a placeholder.
+System 2 uses deterministic evidence candidate generation tailored to the mock dataset,
+then uses Gemma to adjudicate ambiguous aliases. The installed E2B model is not used to
+generate the complete nested graph because its long structured output is unreliable. The
+repository does not yet implement episodic-to-knowledge-base fallback retrieval, pattern
+detection, procedural skill synthesis, or functional MCP tools. The Procedural UI entry
+remains a placeholder.

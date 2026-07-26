@@ -56,6 +56,13 @@ type GraphNode = {
   description: string | null
   attributes: Record<string, string>
   confidence: number
+  external_attributes: Array<{
+    provider: string
+    field_group: string
+    payload: Record<string, unknown>
+    source_url: string | null
+    confidence: number
+  }>
 }
 type GraphEdge = {
   id: string
@@ -349,7 +356,7 @@ function SleepView({ runs, graph, consolidating, error, onConsolidate, onRefresh
               {graph.nodes.map((node) => (
                 <article className="entity-item" key={node.id}>
                   <span className={`entity-kind kind-${node.kind.toLowerCase()}`}>{node.kind}</span>
-                  <div><strong>{node.name}</strong>{node.aliases.length > 0 && <small>aka {node.aliases.join(', ')}</small>}<p>{node.description}</p></div>
+                  <div><strong>{node.name}</strong>{node.aliases.length > 0 && <small>aka {node.aliases.join(', ')}</small>}{node.external_attributes.length > 0 && <small className="external-source">enriched by {node.external_attributes.map((item) => item.provider).join(', ')}</small>}<p>{node.description}</p></div>
                   <span className="confidence">{Math.round(node.confidence * 100)}%</span>
                 </article>
               ))}
