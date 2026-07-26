@@ -81,3 +81,31 @@ class Mem0EpisodeStore:
             explain=True,
         )
         return list(result.get("results", []))
+
+    async def add_retrieval_episode(
+        self,
+        *,
+        episode_id: str,
+        answer: str,
+        query: str,
+        occurred_at: str,
+    ) -> str:
+        result = await asyncio.to_thread(
+            self._get_memory().add,
+            answer,
+            user_id=self.settings.memory_user_id,
+            metadata={
+                "episode_id": episode_id,
+                "memory_kind": "retrieval",
+                "source_type": "recall",
+                "conversation_id": "recall",
+                "query": query,
+                "occurred_at": occurred_at,
+                "status": "active",
+            },
+            infer=False,
+        )
+        results = result.get("results", [])
+        if not results:
+            raise RuntimeError("Mem0 did not return an indexed retrieval memory")
+        return str(results[0]["id"])

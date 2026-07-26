@@ -17,6 +17,8 @@ from synapse.db.session import engine, get_session
 from synapse.episodic.service import SystemOneService
 from synapse.inference.cactus import CactusInterpreter
 from synapse.memory.mem0_store import Mem0EpisodeStore
+from synapse.recall.models import RecallResult
+from synapse.recall.service import RecallService
 from synapse.semantic.repository import load_entities, load_relationships
 from synapse.sources.mock import mock_events
 
@@ -43,6 +45,10 @@ class ReplayResponse(BaseModel):
     processed: int
     skipped: int
     indexed: int
+
+
+class RecallRequest(BaseModel):
+    query: str
 
 
 class ConsolidationRunResponse(BaseModel):
@@ -190,6 +196,14 @@ async def replay_demo(
             skipped += 1
         indexed += int(episode.mem0_id is not None)
     return ReplayResponse(processed=processed, skipped=skipped, indexed=indexed)
+
+
+@app.post("/api/recall", response_model=RecallResult)
+async def recall(
+    request: RecallRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> RecallResult:
+    return await RecallService().recall(request.query, session)
 
 
 def consolidation_response(run: ConsolidationRun) -> ConsolidationRunResponse:

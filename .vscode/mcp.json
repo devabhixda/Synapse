@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "synapse-memory": {
+      "type": "stdio",
+      "command": "docker",
+      "args": ["compose", "run", "--rm", "-T", "--build", "mcp"]
+    }
+  }
+}

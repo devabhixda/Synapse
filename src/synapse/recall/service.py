@@ -1,0 +1,216 @@
+import hashlib
+import re
+import time
+from datetime import UTC, datetime
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from synapse.db.models import Episode, EpisodeKind, RecallEvent, SourceType
+from synapse.memory.mem0_store import Mem0EpisodeStore
+from synapse.recall.answerability import EpisodeAnswerabilityJudge
+from synapse.recall.models import RecallCitation, RecallResult
+from synapse.semantic.repository import search_semantic_context
+
+
+def normalize_query(value: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", value.casefold()).split())
+
+
+class RecallService:
+    def __init__(
+        self,
+        memory_store: Mem0EpisodeStore | None = None,
+        judge: EpisodeAnswerabilityJudge | None = None,
+    ) -> None:
+        self.memory_store = memory_store or Mem0EpisodeStore()
+        self.judge = judge or EpisodeAnswerabilityJudge()
+
+    async def recall(self, query: str, session: AsyncSession) -> RecallResult:
+        started = time.perf_counter()
+        normalized = normalize_query(query)
+        if not normalized:
+            raise ValueError("Recall query cannot be empty")
+
+        memories = await self.memory_store.search(query)
+        candidates = await self._durable_candidates(memories, session)
+        selection = await self.judge.select(
+            query,
+            [
+                {
+                    "episode_id": str(episode.id),
+                    "text": episode.summary or episode.content,
+                }
+                for episode, _ in candidates
+            ],
+        )
+        if selection.answerable and selection.selected_episode_id:
+            selected = next(
+                (
+                    (episode, memory)
+                    for episode, memory in candidates
+                    if str(episode.id) == selection.selected_episode_id
+                ),
+                None,
+            )
+            if selected is not None:
+                episode, memory = selected
+                result = RecallResult(
+                    query=query,
+                    answer=episode.summary or episode.content,
+                    answer_origin="episodic",
+                    citations=episode_citations(episode),
+                    selected_ids=[str(episode.id)],
+                    score_details={
+                        "memory_score": memory.get("score"),
+                        "answerability_confidence": selection.confidence,
+                        "memory_kind": episode.kind.value,
+                    },
+                    latency_ms=(time.perf_counter() - started) * 1000,
+                )
+                await self._record_event(result, normalized, session)
+                return result
+
+        semantic = await search_semantic_context(query, session)
+        if semantic.answer is None:
+            result = RecallResult(
+                query=query,
+                answer=None,
+                answer_origin="miss",
+                score_details={"episodic_candidates": len(candidates)},
+                latency_ms=(time.perf_counter() - started) * 1000,
+            )
+            await self._record_event(result, normalized, session)
+            return result
+
+        retrieval_episode = await self._write_back(
+            query=query,
+            normalized_query=normalized,
+            answer=semantic.answer,
+            citations=semantic.citations,
+            session=session,
+        )
+        result = RecallResult(
+            query=query,
+            answer=semantic.answer,
+            answer_origin="semantic_fallback",
+            citations=semantic.citations,
+            selected_ids=semantic.selected_ids,
+            score_details={
+                "episodic_candidates": len(candidates),
+                "semantic_matches": len(semantic.selected_ids),
+            },
+            created_episode_id=str(retrieval_episode.id),
+            latency_ms=(time.perf_counter() - started) * 1000,
+        )
+        await self._record_event(result, normalized, session)
+        return result
+
+    async def _durable_candidates(
+        self, memories: list[dict[str, Any]], session: AsyncSession
+    ) -> list[tuple[Episode, dict[str, Any]]]:
+        candidates: list[tuple[Episode, dict[str, Any]]] = []
+        for memory in memories:
+            metadata = memory.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+            episode_id = metadata.get("episode_id")
+            if not isinstance(episode_id, str):
+                continue
+            episode = await session.get(Episode, episode_id)
+            if episode is not None and episode.stale_at is None:
+                candidates.append((episode, memory))
+        return candidates
+
+    async def _write_back(
+        self,
+        *,
+        query: str,
+        normalized_query: str,
+        answer: str,
+        citations: list[RecallCitation],
+        session: AsyncSession,
+    ) -> Episode:
+        citation_ids = sorted(citation.id for citation in citations)
+        digest = hashlib.sha256(
+            f"{normalized_query}|{'|'.join(citation_ids)}".encode()
+        ).hexdigest()[:24]
+        source_id = f"recall-{digest}"
+        existing = await session.scalar(
+            select(Episode).where(
+                Episode.source_type == SourceType.RECALL,
+                Episode.source_id == source_id,
+            )
+        )
+        if existing is not None:
+            return existing
+
+        now = datetime.now(UTC)
+        episode = Episode(
+            kind=EpisodeKind.RETRIEVAL,
+            source_type=SourceType.RECALL,
+            source_id=source_id,
+            conversation_id="recall",
+            content=query,
+            summary=answer,
+            participants=["local-user"],
+            details={
+                "query": query,
+                "normalized_query": normalized_query,
+                "citations": [citation.model_dump(mode="json") for citation in citations],
+                "answer_origin": "semantic_fallback",
+            },
+            occurred_at=now,
+        )
+        session.add(episode)
+        await session.flush()
+        try:
+            episode.mem0_id = await self.memory_store.add_retrieval_episode(
+                episode_id=str(episode.id),
+                answer=answer,
+                query=query,
+                occurred_at=now.isoformat(),
+            )
+        except Exception as error:
+            episode.details = {**episode.details, "memory_index_error": type(error).__name__}
+        await session.commit()
+        await session.refresh(episode)
+        return episode
+
+    async def _record_event(
+        self, result: RecallResult, normalized_intent: str, session: AsyncSession
+    ) -> None:
+        session.add(
+            RecallEvent(
+                query=result.query,
+                normalized_intent=normalized_intent,
+                answer_origin=result.answer_origin,
+                selected_ids=result.selected_ids,
+                score_details=result.score_details,
+                latency_ms=result.latency_ms,
+                created_episode_id=result.created_episode_id,
+            )
+        )
+        await session.commit()
+
+
+def episode_citations(episode: Episode) -> list[RecallCitation]:
+    if episode.kind == EpisodeKind.RETRIEVAL:
+        stored_citations = episode.details.get("citations")
+        if isinstance(stored_citations, list):
+            citations = [
+                RecallCitation.model_validate(item)
+                for item in stored_citations
+                if isinstance(item, dict)
+            ]
+            if citations:
+                return citations
+    return [
+        RecallCitation(
+            kind="episode",
+            id=str(episode.id),
+            label=f"{episode.source_type.value} episode",
+            excerpt=episode.content,
+        )
+    ]
