@@ -111,6 +111,80 @@ class RecallEvent(Base):
     )
 
 
+class WorkflowPattern(Base):
+    __tablename__ = "workflow_patterns"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    key: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32), default="candidate", index=True)
+    occurrence_count: Mapped[int] = mapped_column(Integer, default=0)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    evidence_recall_ids: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    skill_spec: Mapped["SkillSpec | None"] = relationship(
+        back_populates="pattern", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class SkillSpec(Base):
+    __tablename__ = "skill_specs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    pattern_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workflow_patterns.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(32), default="candidate", index=True)
+    purpose: Mapped[str] = mapped_column(Text)
+    triggers: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    required_queries: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    steps: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    guardrails: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    expected_output: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    pattern: Mapped[WorkflowPattern] = relationship(back_populates="skill_spec")
+    revisions: Mapped[list["SkillSpecRevision"]] = relationship(
+        back_populates="skill_spec", cascade="all, delete-orphan"
+    )
+
+
+class SkillSpecRevision(Base):
+    __tablename__ = "skill_spec_revisions"
+    __table_args__ = (
+        UniqueConstraint("skill_spec_id", "version", name="uq_skill_spec_revision"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    skill_spec_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("skill_specs.id", ondelete="CASCADE"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    skill_spec: Mapped[SkillSpec] = relationship(back_populates="revisions")
+
+
 class ConsolidationRun(Base):
     __tablename__ = "consolidation_runs"
 

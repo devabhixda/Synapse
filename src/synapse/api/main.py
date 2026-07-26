@@ -17,6 +17,13 @@ from synapse.db.session import engine, get_session
 from synapse.episodic.service import SystemOneService
 from synapse.inference.cactus import CactusInterpreter
 from synapse.memory.mem0_store import Mem0EpisodeStore
+from synapse.procedural.models import (
+    DetectionResult,
+    PatternView,
+    SkillSpecView,
+    SkillStatusUpdate,
+)
+from synapse.procedural.service import ProceduralMemoryService, list_patterns, list_skills
 from synapse.recall.models import RecallResult
 from synapse.recall.service import RecallService
 from synapse.semantic.repository import load_entities, load_relationships
@@ -204,6 +211,38 @@ async def recall(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> RecallResult:
     return await RecallService().recall(request.query, session)
+
+
+@app.post("/api/procedural/detect", response_model=DetectionResult)
+async def detect_procedural_patterns(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> DetectionResult:
+    return await ProceduralMemoryService().detect(session)
+
+
+@app.get("/api/procedural/patterns", response_model=list[PatternView])
+async def get_procedural_patterns(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[PatternView]:
+    return await list_patterns(session)
+
+
+@app.get("/api/procedural/skills", response_model=list[SkillSpecView])
+async def get_procedural_skills(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> list[SkillSpecView]:
+    return await list_skills(session)
+
+
+@app.post("/api/procedural/skills/{skill_id}/status", response_model=SkillSpecView)
+async def update_procedural_skill_status(
+    skill_id: str,
+    update: SkillStatusUpdate,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> SkillSpecView:
+    return await ProceduralMemoryService().set_status(
+        skill_id, update.status, session
+    )
 
 
 def consolidation_response(run: ConsolidationRun) -> ConsolidationRunResponse:

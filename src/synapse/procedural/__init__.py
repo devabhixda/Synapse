@@ -1,0 +1,1 @@
+"""Procedural memory pattern detection and skill synthesis."""

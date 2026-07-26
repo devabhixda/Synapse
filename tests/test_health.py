@@ -11,3 +11,6 @@ def test_openapi_exposes_health() -> None:
     assert "/api/system2/runs" in schema["paths"]
     assert "/api/system2/graph" in schema["paths"]
     assert "/api/recall" in schema["paths"]
+    assert "/api/procedural/detect" in schema["paths"]
+    assert "/api/procedural/patterns" in schema["paths"]
+    assert "/api/procedural/skills" in schema["paths"]

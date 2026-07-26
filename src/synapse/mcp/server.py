@@ -4,6 +4,8 @@ from mcp.server.fastmcp import FastMCP
 
 from synapse.db.models import Episode
 from synapse.db.session import session_factory
+from synapse.procedural.models import SkillSpecView
+from synapse.procedural.service import get_skill_by_name, list_skills
 from synapse.recall.models import EpisodeDetail, RecallResult
 from synapse.recall.service import RecallService
 
@@ -45,6 +47,20 @@ async def get_episode(episode_id: str) -> EpisodeDetail:
             participants=episode.participants,
             details=episode.details,
         )
+
+
+@mcp.tool(structured_output=True)
+async def list_skill_specs() -> list[SkillSpecView]:
+    """List approved procedural workflows available to the coding agent."""
+    async with session_factory() as session:
+        return await list_skills(session, approved_only=True)
+
+
+@mcp.tool(structured_output=True)
+async def get_skill_spec(name: str) -> SkillSpecView:
+    """Get one approved procedural workflow by its stable name."""
+    async with session_factory() as session:
+        return await get_skill_by_name(session, name, approved_only=True)
 
 
 def main() -> None:
