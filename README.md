@@ -21,6 +21,13 @@ flowchart LR
 	H --> I[Gemma alias adjudication]
 	I --> J[Crustdata company enrichment]
 	J --> K[Semantic graph and Sleep workbench]
+	L[VS Code agent] --> M[MCP recall]
+	M --> N{Episode answers?}
+	N -->|Yes| O[Serve episodic memory]
+	N -->|No| K
+	K --> P[Serve semantic answer]
+	P --> Q[Create retrieval episode]
+	Q --> E
 ```
 
 System 1 currently produces:
@@ -51,7 +58,19 @@ relationships, and evidence to the semantic graph.
 - Crustdata domain identification and selected company-profile enrichment
 - Provider-specific 24-hour enrichment cache
 - Idempotent graph upserts and relationship-to-episode evidence links
+- Episodic-first recall with Gemma answerability selection
+- Evidence-backed semantic fallback and explicit total misses
+- Retrieval-episode write-back into Mem0 for future paraphrased queries
+- Recall-event telemetry recording origin, selected IDs, scores, and latency
 - Worker container with database connectivity for background-process scaffolding
+
+### MCP
+
+- Stable MCP Python SDK v1 server over stdio
+- Typed `recall` tool using the mandatory episodic-first learning loop
+- Typed `get_episode` tool for citation inspection
+- Docker Compose launch through `.vscode/mcp.json`
+- Workspace instructions requiring coding agents to use `recall` for organizational context
 
 ### Local Inference
 
@@ -140,6 +159,56 @@ Open the Sleep view and select **Start sleep cycle**, or trigger it directly:
 curl --fail --request POST http://localhost:3000/api/system2/consolidate
 ```
 
+Ask Synapse through HTTP:
+
+```sh
+curl --fail http://localhost:3000/api/recall \
+	--header 'Content-Type: application/json' \
+	--data '{"query":"What industry is Crustdata in and how large is it?"}'
+```
+
+### Use MCP in VS Code
+
+VS Code discovers the `synapse-memory` server from `.vscode/mcp.json`. The configuration
+launches the current server image with:
+
+```sh
+docker compose run --rm -T --build mcp
+```
+
+Keep native Cactus and the Docker stack running, then:
+
+1. Open the Command Palette with `Cmd+Shift+P`.
+2. Run **MCP: List Servers**.
+3. Select `synapse-memory` and start or restart it.
+4. Open Copilot Chat in Agent mode.
+5. Enable the Synapse tools in the tools picker if they are not already enabled.
+
+Available tools:
+
+- `recall(query)` runs the episodic-first learning loop and returns structured citations.
+- `get_episode(episode_id)` inspects one durable episode cited by a recall result.
+
+Example agent prompts:
+
+```text
+Use the synapse-memory recall tool to tell me what database Atlas API uses.
+Include the evidence citations.
+```
+
+```text
+Ask Synapse what industry Crustdata is in and how large it is.
+```
+
+For an answer already present in an episode, `answer_origin` is `episodic`. When episodes
+do not contain the answer, it is `semantic_fallback` and `created_episode_id` identifies the
+new retrieval episode. A similar later request should return `episodic` with
+`memory_kind: retrieval` in `score_details`.
+
+After changing MCP code, use **MCP: List Servers → synapse-memory → Restart Server**. If
+the server is not listed, run **Developer: Reload Window**. Running the Compose MCP command
+manually will appear idle because the process is waiting for protocol messages on stdin.
+
 Open:
 
 - Workbench: http://localhost:3000
@@ -147,8 +216,9 @@ Open:
 - OpenAPI: http://localhost:8000/docs
 
 The Docker containers access native Cactus through `host.docker.internal`. If Cactus is not
-running, the application remains available in degraded mode and records episodes with
-pending Mem0 indexing. Running the replay again after Cactus starts reconciles them.
+running, health reports degraded and `INFERENCE_MODE=auto` refuses to store a fallback
+System 1 observation. Use `INFERENCE_MODE=fake` only when deterministic interpretation is
+explicitly desired.
 
 ## API
 
@@ -158,6 +228,7 @@ pending Mem0 indexing. Running the replay again after Cactus starts reconciles t
 | `GET` | `/api/config` | Public model, embedding dimension, and retrieval threshold |
 | `GET` | `/api/episodes` | Latest persisted episodes and Mem0 indexing state |
 | `POST` | `/api/demo/replay` | Idempotently process and reconcile the mock event stream |
+| `POST` | `/api/recall` | Search episodes first, fall back to graph, and learn from fallback |
 | `POST` | `/api/system2/consolidate` | Run a persisted sleep cycle over a frozen episode snapshot |
 | `GET` | `/api/system2/runs` | List recent consolidation runs and graph diffs |
 | `GET` | `/api/system2/graph` | Return canonical entities, aliases, relationships, and evidence |
@@ -171,6 +242,7 @@ pending Mem0 indexing. Running the replay again after Cactus starts reconciles t
 | `api` | FastAPI, System 1, Cactus client, and Mem0 |
 | `worker` | Background worker process and database heartbeat |
 | `web` | nginx-hosted React build and `/api` proxy |
+| `mcp` | On-demand stdio MCP server for VS Code |
 | `test` | Container profile for pytest |
 
 ## Commands
@@ -205,12 +277,15 @@ The current implementation passes:
 - Crustdata fixture and live-response parser tests
 - Live consolidation and graph idempotency checks
 - Live Crustdata enrichment and cache verification
+- Episodic miss → semantic fallback → retrieval-episode write-back
+- Paraphrased episodic hit with preserved original citations
+- MCP initialize, tool discovery, and structured `recall` invocation over stdio
 
 ## Current Boundaries
 
 System 2 uses deterministic evidence candidate generation tailored to the mock dataset,
 then uses Gemma to adjudicate ambiguous aliases. The installed E2B model is not used to
 generate the complete nested graph because its long structured output is unreliable. The
-repository does not yet implement episodic-to-knowledge-base fallback retrieval, pattern
-detection, procedural skill synthesis, or functional MCP tools. The Procedural UI entry
-remains a placeholder.
+repository does not yet implement pattern detection or procedural skill synthesis. The
+Procedural UI entry remains a placeholder. MCP currently exposes recall and citation
+inspection only; coding actions remain with the VS Code agent.
