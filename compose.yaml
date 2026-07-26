@@ -1,0 +1,98 @@
+name: synapse
+
+x-backend: &backend
+  build:
+    context: .
+    dockerfile: docker/backend.Dockerfile
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    DATABASE_URL: postgresql+asyncpg://synapse:synapse@db:5432/synapse
+    CACTUS_CHAT_BASE_URL: ${CACTUS_CHAT_BASE_URL:-http://host.docker.internal:8080/v1}
+    CACTUS_EMBEDDING_BASE_URL: ${CACTUS_EMBEDDING_BASE_URL:-http://host.docker.internal:8080/v1}
+  extra_hosts:
+    - host.docker.internal:host-gateway
+
+services:
+  db:
+    image: pgvector/pgvector:0.8.5-pg18-trixie
+    environment:
+      POSTGRES_DB: synapse
+      POSTGRES_USER: synapse
+      POSTGRES_PASSWORD: synapse
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U synapse -d synapse]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql
+
+  migrate:
+    <<: *backend
+    command: [alembic, upgrade, head]
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: no
+
+  api:
+    <<: *backend
+    command: [uvicorn, synapse.api.main:app, --host, 0.0.0.0, --port, "8000"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports:
+      - ${SYNAPSE_API_PORT:-8000}:8000
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -qO-, http://127.0.0.1/]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports:
+      - ${SYNAPSE_WEB_PORT:-3000}:80
+
+  worker:
+    <<: *backend
+    command: [python, -m, synapse.worker]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  mcp:
+    <<: *backend
+    command: [python, -m, synapse.mcp.server]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    profiles: [tools]
+    stdin_open: true
+
+  test:
+    <<: *backend
+    command: [pytest]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://synapse:synapse@db:5432/synapse_test
+      CACTUS_CHAT_BASE_URL: ${CACTUS_CHAT_BASE_URL:-http://host.docker.internal:8080/v1}
+      CACTUS_EMBEDDING_BASE_URL: ${CACTUS_EMBEDDING_BASE_URL:-http://host.docker.internal:8080/v1}
+    profiles: [test]
+
+volumes:
+  postgres-data:
