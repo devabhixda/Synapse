@@ -32,20 +32,28 @@ async def load_entities(group_id: str, session: AsyncSession) -> list[SemanticEn
 
 
 async def load_relationships(
-    group_id: str, session: AsyncSession
+    group_id: str, session: AsyncSession, *, include_superseded: bool = False
 ) -> list[SemanticRelationship]:
+    """Edges for one account, current ones only unless asked otherwise.
+
+    Retired edges stay in the table so history can be reconstructed, but an
+    answer built from them would state as fact something already contradicted,
+    so they are excluded by default.
+    """
+    statement = select(SemanticRelationship).where(
+        SemanticRelationship.group_id == group_id
+    )
+    if not include_superseded:
+        statement = statement.where(SemanticRelationship.invalid_at.is_(None))
     return list(
         await session.scalars(
-            select(SemanticRelationship)
-            .where(SemanticRelationship.group_id == group_id)
-            .options(
+            statement.options(
                 selectinload(SemanticRelationship.subject),
                 selectinload(SemanticRelationship.object),
                 selectinload(SemanticRelationship.evidence).selectinload(
                     RelationshipEvidence.episode
                 ),
-            )
-            .order_by(SemanticRelationship.predicate, SemanticRelationship.id)
+            ).order_by(SemanticRelationship.predicate, SemanticRelationship.id)
         )
     )
 

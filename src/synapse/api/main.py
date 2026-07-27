@@ -123,6 +123,8 @@ class GraphEdgeResponse(BaseModel):
     predicate: str
     attributes: dict[str, Any]
     confidence: float
+    valid_at: str
+    invalid_at: str | None
     evidence: list[GraphEvidenceResponse]
 
 
@@ -351,6 +353,10 @@ async def get_graph(
                 predicate=relationship.predicate,
                 attributes=relationship.attributes,
                 confidence=relationship.confidence,
+                valid_at=relationship.valid_at.isoformat(),
+                invalid_at=(
+                    relationship.invalid_at.isoformat() if relationship.invalid_at else None
+                ),
                 evidence=[
                     GraphEvidenceResponse(
                         episode_id=str(evidence.episode_id),
