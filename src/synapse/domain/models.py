@@ -64,7 +64,7 @@ class FastInterpreter(Protocol):
 
 class EpisodeMemoryStore(Protocol):
     async def add_episode(
-        self, *, episode_id: str, summary: str, event: SourceEvent
+        self, *, episode_id: str, group_id: str, summary: str, event: SourceEvent
     ) -> str: ...
 
-    async def search(self, query: str) -> list[dict[str, Any]]: ...
+    async def search(self, query: str, group_id: str) -> list[dict[str, Any]]: ...

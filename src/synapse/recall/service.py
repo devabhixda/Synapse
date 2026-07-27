@@ -37,14 +37,14 @@ class RecallService:
         self.memory_store = memory_store or Mem0EpisodeStore()
         self.judge = judge or EpisodeAnswerabilityJudge()
 
-    async def recall(self, query: str, session: AsyncSession) -> RecallResult:
+    async def recall(self, query: str, group_id: str, session: AsyncSession) -> RecallResult:
         started = time.perf_counter()
         normalized = normalize_query(query)
         if not normalized:
             raise ValueError("Recall query cannot be empty")
 
-        memories = await self.memory_store.search(query)
-        candidates = await self._durable_candidates(query, memories, session)
+        memories = await self.memory_store.search(query, group_id)
+        candidates = await self._durable_candidates(query, group_id, memories, session)
         selection = await self.judge.select(
             query,
             [
@@ -79,10 +79,10 @@ class RecallService:
                     },
                     latency_ms=(time.perf_counter() - started) * 1000,
                 )
-                await self._record_event(result, normalized, session)
+                await self._record_event(result, group_id, normalized, session)
                 return result
 
-        semantic = await search_semantic_context(query, session)
+        semantic = await search_semantic_context(query, group_id, session)
         if semantic.answer is None:
             result = RecallResult(
                 query=query,
@@ -91,11 +91,12 @@ class RecallService:
                 score_details={"episodic_candidates": len(candidates)},
                 latency_ms=(time.perf_counter() - started) * 1000,
             )
-            await self._record_event(result, normalized, session)
+            await self._record_event(result, group_id, normalized, session)
             return result
 
         retrieval_episode = await self._write_back(
             query=query,
+            group_id=group_id,
             normalized_query=normalized,
             answer=semantic.answer,
             citations=semantic.citations,
@@ -114,11 +115,15 @@ class RecallService:
             created_episode_id=str(retrieval_episode.id),
             latency_ms=(time.perf_counter() - started) * 1000,
         )
-        await self._record_event(result, normalized, session)
+        await self._record_event(result, group_id, normalized, session)
         return result
 
     async def _durable_candidates(
-        self, query: str, memories: list[dict[str, Any]], session: AsyncSession
+        self,
+        query: str,
+        group_id: str,
+        memories: list[dict[str, Any]],
+        session: AsyncSession,
     ) -> list[tuple[Episode, dict[str, Any]]]:
         candidates: list[tuple[Episode, dict[str, Any]]] = []
         for memory in memories:
@@ -129,13 +134,21 @@ class RecallService:
             if not isinstance(episode_id, str):
                 continue
             episode = await session.get(Episode, episode_id)
-            if episode is not None and episode.stale_at is None:
-                candidates.append((episode, memory))
+            if episode is None or episode.stale_at is not None:
+                continue
+            # Mem0 filters on user_id, but it is a separate store with its own
+            # index: a vector left behind by a deleted episode, or metadata
+            # written before tenancy, would otherwise hand back another
+            # account's text. The episode row is the authority on ownership.
+            if episode.group_id != group_id:
+                continue
+            candidates.append((episode, memory))
 
         if needs_substantive_update(query) and candidates:
             request_episode_ids = set(
                 await session.scalars(
                     select(IntentObservation.episode_id).where(
+                        IntentObservation.group_id == group_id,
                         IntentObservation.episode_id.in_(
                             episode.id for episode, _ in candidates
                         ),
@@ -154,6 +167,7 @@ class RecallService:
         self,
         *,
         query: str,
+        group_id: str,
         normalized_query: str,
         answer: str,
         citations: list[RecallCitation],
@@ -166,6 +180,7 @@ class RecallService:
         source_id = f"recall-{digest}"
         existing = await session.scalar(
             select(Episode).where(
+                Episode.group_id == group_id,
                 Episode.source_type == SourceType.RECALL,
                 Episode.source_id == source_id,
             )
@@ -175,6 +190,7 @@ class RecallService:
 
         now = datetime.now(UTC)
         episode = Episode(
+            group_id=group_id,
             kind=EpisodeKind.RETRIEVAL,
             source_type=SourceType.RECALL,
             source_id=source_id,
@@ -195,6 +211,7 @@ class RecallService:
         try:
             episode.mem0_id = await self.memory_store.add_retrieval_episode(
                 episode_id=str(episode.id),
+                group_id=group_id,
                 answer=answer,
                 query=query,
                 occurred_at=now.isoformat(),
@@ -206,10 +223,15 @@ class RecallService:
         return episode
 
     async def _record_event(
-        self, result: RecallResult, normalized_intent: str, session: AsyncSession
+        self,
+        result: RecallResult,
+        group_id: str,
+        normalized_intent: str,
+        session: AsyncSession,
     ) -> None:
         session.add(
             RecallEvent(
+                group_id=group_id,
                 query=result.query,
                 normalized_intent=normalized_intent,
                 answer_origin=result.answer_origin,

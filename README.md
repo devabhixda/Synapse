@@ -151,9 +151,14 @@ The default preview selects up to 40 conversations with a score of at least 4, c
 30 per channel from `all-docwise` and `scribe-iteration`. Import the same deterministic set:
 
 ```sh
+export SYNAPSE_GROUP_ID="acme"
 make slack-import
-curl --fail --request POST http://localhost:3000/api/system2/consolidate
+curl --fail --request POST "http://localhost:3000/api/system2/consolidate?group_id=acme"
 ```
+
+One export belongs to one account, so `SYNAPSE_GROUP_ID` names where it lands. Importing a
+second workspace under a different `group_id` keeps the two entirely separate, including
+channels that happen to share a name.
 
 Re-running the import is idempotent because source IDs derive from channel and Slack thread
 timestamps. Keep the export outside this repository; `slack-exports/` is ignored as an
@@ -223,19 +228,20 @@ make slack-import
 For the public deterministic fallback:
 
 ```sh
+export SYNAPSE_GROUP_ID="demo"
 make replay
 ```
 
 Open the Sleep view and select **Start sleep cycle**, or trigger it directly:
 
 ```sh
-curl --fail --request POST http://localhost:3000/api/system2/consolidate
+curl --fail --request POST "http://localhost:3000/api/system2/consolidate?group_id=demo"
 ```
 
 Ask Synapse through HTTP. This example is available with the public fallback dataset:
 
 ```sh
-curl --fail http://localhost:3000/api/recall \
+curl --fail "http://localhost:3000/api/recall?group_id=demo" \
 	--header 'Content-Type: application/json' \
 	--data '{"query":"What does Random Labs build and how does it complement Synapse?"}'
 ```
@@ -293,7 +299,7 @@ Repeat a recall workflow at least twice, then use the Procedural view's **Detect
 button or call:
 
 ```sh
-curl --fail --request POST http://localhost:3000/api/procedural/detect
+curl --fail --request POST "http://localhost:3000/api/procedural/detect?group_id=demo"
 ```
 
 Review the generated skill in the Procedural view. Candidate and rejected skills remain
@@ -313,20 +319,35 @@ explicitly desired.
 
 ## API
 
+Every route that touches stored memory requires a `group_id` query parameter naming
+the account to read from or write to. Memory is never shared between accounts: an
+entity, a workflow, or a Slack thread with the same name in two accounts is two
+separate rows, and no query returns another account's data. `group_id` is any stable
+label you choose — a customer slug, a team name — and it has no default, so a request
+that omits it is rejected rather than silently landing somewhere.
+
+Upgrading an existing database: migration `0005` assigns every pre-existing row to a
+single account, named by `SYNAPSE_BACKFILL_GROUP_ID` and defaulting to `default`. Set it
+before running `alembic upgrade head` to pick the name; changing it afterwards is a plain
+`UPDATE`, since the value is only a label.
+
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/health` | PostgreSQL and Cactus availability plus active models |
 | `GET` | `/api/config` | Public model, embedding dimension, and retrieval threshold |
-| `GET` | `/api/episodes` | Latest persisted episodes and Mem0 indexing state |
-| `POST` | `/api/demo/replay` | Idempotently process and reconcile the mock event stream |
-| `POST` | `/api/recall` | Search episodes first, fall back to graph, and learn from fallback |
-| `POST` | `/api/procedural/detect` | Detect repeated recall workflows and synthesize skills |
-| `GET` | `/api/procedural/patterns` | List observed workflow patterns and evidence IDs |
-| `GET` | `/api/procedural/skills` | List skill candidates, versions, and review states |
-| `POST` | `/api/procedural/skills/{id}/status` | Approve, reject, or reset a skill candidate |
-| `POST` | `/api/system2/consolidate` | Run a persisted sleep cycle over a frozen episode snapshot |
-| `GET` | `/api/system2/runs` | List recent consolidation runs and graph diffs |
-| `GET` | `/api/system2/graph` | Return canonical entities, aliases, relationships, and evidence |
+| `GET` | `/api/episodes?group_id=` | Latest persisted episodes and Mem0 indexing state |
+| `POST` | `/api/demo/replay?group_id=` | Idempotently process and reconcile the mock event stream |
+| `POST` | `/api/recall?group_id=` | Search episodes first, fall back to graph, and learn from fallback |
+| `POST` | `/api/procedural/detect?group_id=` | Detect repeated recall workflows and synthesize skills |
+| `GET` | `/api/procedural/patterns?group_id=` | List observed workflow patterns and evidence IDs |
+| `GET` | `/api/procedural/skills?group_id=` | List skill candidates, versions, and review states |
+| `POST` | `/api/procedural/skills/{id}/status?group_id=` | Approve, reject, or reset a skill candidate |
+| `POST` | `/api/system2/consolidate?group_id=` | Run a persisted sleep cycle over a frozen episode snapshot |
+| `GET` | `/api/system2/runs?group_id=` | List recent consolidation runs and graph diffs |
+| `GET` | `/api/system2/graph?group_id=` | Return canonical entities, aliases, relationships, and evidence |
+
+The MCP tools take `group_id` the same way: `recall`, `get_episode`,
+`list_skill_specs`, and `get_skill_spec` each require it as an argument.
 
 ## Docker Services
 

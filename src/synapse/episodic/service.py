@@ -10,9 +10,12 @@ class SystemOneService:
         self.interpreter = interpreter
         self.memory_store = memory_store
 
-    async def process(self, event: SourceEvent, session: AsyncSession) -> tuple[Episode, bool]:
+    async def process(
+        self, event: SourceEvent, group_id: str, session: AsyncSession
+    ) -> tuple[Episode, bool]:
         existing = await session.scalar(
             select(Episode).where(
+                Episode.group_id == group_id,
                 Episode.source_type == event.source_type,
                 Episode.source_id == event.source_id,
             )
@@ -21,7 +24,10 @@ class SystemOneService:
             if existing.mem0_id is None and existing.summary:
                 try:
                     existing.mem0_id = await self.memory_store.add_episode(
-                        episode_id=str(existing.id), summary=existing.summary, event=event
+                        episode_id=str(existing.id),
+                        group_id=group_id,
+                        summary=existing.summary,
+                        event=event,
                     )
                     existing.details = {
                         key: value
@@ -40,6 +46,7 @@ class SystemOneService:
 
         observation = await self.interpreter.observe(event)
         episode = Episode(
+            group_id=group_id,
             kind=EpisodeKind.SOURCE,
             source_type=event.source_type,
             source_id=event.source_id,
@@ -52,6 +59,7 @@ class SystemOneService:
         )
         episode.observations.append(
             IntentObservation(
+                group_id=group_id,
                 intent=observation.intent,
                 salience=observation.salience,
                 entity_mentions=observation.entity_mentions,
@@ -66,7 +74,10 @@ class SystemOneService:
 
         try:
             episode.mem0_id = await self.memory_store.add_episode(
-                episode_id=str(episode.id), summary=observation.summary, event=event
+                episode_id=str(episode.id),
+                group_id=group_id,
+                summary=observation.summary,
+                event=event,
             )
         except Exception as error:
             episode.details = {**episode.details, "memory_index_error": type(error).__name__}

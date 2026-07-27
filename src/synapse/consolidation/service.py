@@ -30,8 +30,9 @@ class ConsolidationService:
         self.extractor = extractor or GemmaSemanticExtractor()
         self.enricher = enricher or CrustdataEnricher()
 
-    async def run(self, session: AsyncSession) -> ConsolidationRun:
+    async def run(self, group_id: str, session: AsyncSession) -> ConsolidationRun:
         run = ConsolidationRun(
+            group_id=group_id,
             status="running",
             stage="snapshotting",
             provider="deterministic-system2",
@@ -46,14 +47,19 @@ class ConsolidationService:
             episodes = list(
                 await session.scalars(
                     select(Episode)
-                    .where(Episode.kind == EpisodeKind.SOURCE)
+                    .where(
+                        Episode.group_id == group_id,
+                        Episode.kind == EpisodeKind.SOURCE,
+                    )
                     .order_by(Episode.occurred_at, Episode.id)
                 )
             )
             run.episode_count = len(episodes)
             session.add_all(
                 [
-                    ConsolidationEpisode(run_id=run_id, episode_id=episode.id)
+                    ConsolidationEpisode(
+                        group_id=group_id, run_id=run_id, episode_id=episode.id
+                    )
                     for episode in episodes
                 ]
             )
@@ -85,6 +91,7 @@ class ConsolidationService:
                     select(SemanticEntity)
                     .options(selectinload(SemanticEntity.aliases))
                     .where(
+                        SemanticEntity.group_id == group_id,
                         SemanticEntity.kind == entity_spec.kind,
                         SemanticEntity.normalized_name
                         == normalize_name(entity_spec.canonical_name),
@@ -92,6 +99,7 @@ class ConsolidationService:
                 )
                 if entity is None:
                     entity = SemanticEntity(
+                        group_id=group_id,
                         kind=entity_spec.kind,
                         canonical_name=entity_spec.canonical_name,
                         normalized_name=normalize_name(entity_spec.canonical_name),
@@ -115,6 +123,7 @@ class ConsolidationService:
                     if normalized_alias not in existing_aliases:
                         session.add(
                             EntityAlias(
+                                group_id=group_id,
                                 entity_id=entity.id,
                                 alias=alias_value,
                                 normalized_alias=normalized_alias,
@@ -134,6 +143,7 @@ class ConsolidationService:
                 preferred_provider = "crustdata"
                 cached_enrichment = await session.scalar(
                     select(ExternalAttribute).where(
+                        ExternalAttribute.group_id == group_id,
                         ExternalAttribute.entity_id == entity.id,
                         ExternalAttribute.provider == preferred_provider,
                         ExternalAttribute.field_group == "company_profile",
@@ -159,6 +169,7 @@ class ConsolidationService:
 
                 external_attribute = await session.scalar(
                     select(ExternalAttribute).where(
+                        ExternalAttribute.group_id == group_id,
                         ExternalAttribute.entity_id == entity.id,
                         ExternalAttribute.provider == enrichment.provider,
                         ExternalAttribute.field_group == enrichment.field_group,
@@ -166,6 +177,7 @@ class ConsolidationService:
                 )
                 if external_attribute is None:
                     external_attribute = ExternalAttribute(
+                        group_id=group_id,
                         entity_id=entity.id,
                         provider=enrichment.provider,
                         field_group=enrichment.field_group,
@@ -193,6 +205,7 @@ class ConsolidationService:
                     select(SemanticRelationship)
                     .options(selectinload(SemanticRelationship.evidence))
                     .where(
+                        SemanticRelationship.group_id == group_id,
                         SemanticRelationship.subject_id == subject.id,
                         SemanticRelationship.predicate == relationship_spec.predicate,
                         SemanticRelationship.object_id == object_entity.id,
@@ -200,6 +213,7 @@ class ConsolidationService:
                 )
                 if relationship is None:
                     relationship = SemanticRelationship(
+                        group_id=group_id,
                         subject_id=subject.id,
                         predicate=relationship_spec.predicate,
                         object_id=object_entity.id,
@@ -228,6 +242,7 @@ class ConsolidationService:
                     if episode and episode.id not in evidence_episode_ids:
                         session.add(
                             RelationshipEvidence(
+                                group_id=group_id,
                                 relationship_id=relationship.id,
                                 episode_id=episode.id,
                                 excerpt=episode.content,
@@ -261,7 +276,12 @@ class ConsolidationService:
             return run
         except Exception as error:
             await session.rollback()
-            failed_run = await session.get(ConsolidationRun, run_id)
+            failed_run = await session.scalar(
+                select(ConsolidationRun).where(
+                    ConsolidationRun.id == run_id,
+                    ConsolidationRun.group_id == group_id,
+                )
+            )
             if failed_run is not None:
                 failed_run.status = "failed"
                 failed_run.stage = "failed"

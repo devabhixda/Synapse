@@ -17,10 +17,11 @@ class SemanticContextResult:
     selected_ids: list[str]
 
 
-async def load_entities(session: AsyncSession) -> list[SemanticEntity]:
+async def load_entities(group_id: str, session: AsyncSession) -> list[SemanticEntity]:
     return list(
         await session.scalars(
             select(SemanticEntity)
+            .where(SemanticEntity.group_id == group_id)
             .options(
                 selectinload(SemanticEntity.aliases),
                 selectinload(SemanticEntity.external_attributes),
@@ -30,10 +31,13 @@ async def load_entities(session: AsyncSession) -> list[SemanticEntity]:
     )
 
 
-async def load_relationships(session: AsyncSession) -> list[SemanticRelationship]:
+async def load_relationships(
+    group_id: str, session: AsyncSession
+) -> list[SemanticRelationship]:
     return list(
         await session.scalars(
             select(SemanticRelationship)
+            .where(SemanticRelationship.group_id == group_id)
             .options(
                 selectinload(SemanticRelationship.subject),
                 selectinload(SemanticRelationship.object),
@@ -47,10 +51,10 @@ async def load_relationships(session: AsyncSession) -> list[SemanticRelationship
 
 
 async def search_semantic_context(
-    query: str, session: AsyncSession
+    query: str, group_id: str, session: AsyncSession
 ) -> SemanticContextResult:
-    entities = await load_entities(session)
-    relationships = await load_relationships(session)
+    entities = await load_entities(group_id, session)
+    relationships = await load_relationships(group_id, session)
     normalized_query = normalize_text(query)
     query_tokens = meaningful_tokens(normalized_query)
 

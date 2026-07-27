@@ -50,14 +50,15 @@ class Mem0EpisodeStore:
         return self._memory
 
     async def add_episode(
-        self, *, episode_id: str, summary: str, event: SourceEvent
+        self, *, episode_id: str, group_id: str, summary: str, event: SourceEvent
     ) -> str:
         result = await asyncio.to_thread(
             self._get_memory().add,
             summary,
-            user_id=self.settings.memory_user_id,
+            user_id=group_id,
             metadata={
                 "episode_id": episode_id,
+                "group_id": group_id,
                 "memory_kind": "source",
                 "source_type": event.source_type.value,
                 "conversation_id": event.conversation_id,
@@ -71,11 +72,11 @@ class Mem0EpisodeStore:
             raise RuntimeError("Mem0 did not return an indexed memory")
         return str(results[0]["id"])
 
-    async def search(self, query: str) -> list[dict[str, Any]]:
+    async def search(self, query: str, group_id: str) -> list[dict[str, Any]]:
         result = await asyncio.to_thread(
             self._get_memory().search,
             query,
-            filters={"user_id": self.settings.memory_user_id, "status": "active"},
+            filters={"user_id": group_id, "status": "active"},
             top_k=5,
             threshold=self.settings.memory_hit_threshold,
             explain=True,
@@ -86,6 +87,7 @@ class Mem0EpisodeStore:
         self,
         *,
         episode_id: str,
+        group_id: str,
         answer: str,
         query: str,
         occurred_at: str,
@@ -93,9 +95,10 @@ class Mem0EpisodeStore:
         result = await asyncio.to_thread(
             self._get_memory().add,
             answer,
-            user_id=self.settings.memory_user_id,
+            user_id=group_id,
             metadata={
                 "episode_id": episode_id,
+                "group_id": group_id,
                 "memory_kind": "retrieval",
                 "source_type": "recall",
                 "conversation_id": "recall",
