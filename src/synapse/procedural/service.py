@@ -45,9 +45,13 @@ def is_procedural_evidence(answer_origin: str) -> bool:
 
 
 class ProceduralMemoryService:
-    async def detect(self, session: AsyncSession) -> DetectionResult:
+    async def detect(self, group_id: str, session: AsyncSession) -> DetectionResult:
         events = list(
-            await session.scalars(select(RecallEvent).order_by(RecallEvent.created_at))
+            await session.scalars(
+                select(RecallEvent)
+                .where(RecallEvent.group_id == group_id)
+                .order_by(RecallEvent.created_at)
+            )
         )
         grouped: dict[str, list[RecallEvent]] = defaultdict(list)
         for event in events:
@@ -71,12 +75,16 @@ class ProceduralMemoryService:
         for family, family_events in candidate_groups.items():
             template = TEMPLATES[family]
             pattern = await session.scalar(
-                select(WorkflowPattern).where(WorkflowPattern.key == family)
+                select(WorkflowPattern).where(
+                    WorkflowPattern.group_id == group_id,
+                    WorkflowPattern.key == family,
+                )
             )
             confidence = min(0.98, 0.55 + len(family_events) * 0.1)
             evidence_ids = [str(event.id) for event in family_events]
             if pattern is None:
                 pattern = WorkflowPattern(
+                    group_id=group_id,
                     key=family,
                     name=template.name.replace("_", " ").title(),
                     description=template.purpose,
@@ -99,7 +107,7 @@ class ProceduralMemoryService:
                 patterns_updated += 1
 
             revisions_created += await self._upsert_skill(
-                pattern, template, confidence, session
+                pattern, template, confidence, group_id, session
             )
 
         await session.commit()
@@ -116,6 +124,7 @@ class ProceduralMemoryService:
         pattern: WorkflowPattern,
         template: SkillTemplate,
         confidence: float,
+        group_id: str,
         session: AsyncSession,
     ) -> int:
         snapshot = SkillSpecSnapshot(
@@ -129,10 +138,14 @@ class ProceduralMemoryService:
             confidence=confidence,
         )
         skill = await session.scalar(
-            select(SkillSpec).where(SkillSpec.pattern_id == pattern.id)
+            select(SkillSpec).where(
+                SkillSpec.group_id == group_id,
+                SkillSpec.pattern_id == pattern.id,
+            )
         )
         if skill is None:
             skill = SkillSpec(
+                group_id=group_id,
                 pattern_id=pattern.id,
                 version=1,
                 status="candidate",
@@ -142,6 +155,7 @@ class ProceduralMemoryService:
             await session.flush()
             session.add(
                 SkillSpecRevision(
+                    group_id=group_id,
                     skill_spec_id=skill.id,
                     version=1,
                     snapshot=snapshot.model_dump(mode="json"),
@@ -151,7 +165,10 @@ class ProceduralMemoryService:
 
         latest = await session.scalar(
             select(SkillSpecRevision)
-            .where(SkillSpecRevision.skill_spec_id == skill.id)
+            .where(
+                SkillSpecRevision.group_id == group_id,
+                SkillSpecRevision.skill_spec_id == skill.id,
+            )
             .order_by(SkillSpecRevision.version.desc())
             .limit(1)
         )
@@ -172,6 +189,7 @@ class ProceduralMemoryService:
         skill.confidence = snapshot.confidence
         session.add(
             SkillSpecRevision(
+                group_id=group_id,
                 skill_spec_id=skill.id,
                 version=skill.version,
                 snapshot=serialized,
@@ -180,19 +198,32 @@ class ProceduralMemoryService:
         return 1
 
     async def set_status(
-        self, skill_id: str, status: str, session: AsyncSession
+        self, skill_id: str, status: str, group_id: str, session: AsyncSession
     ) -> SkillSpecView:
         try:
             parsed_id = uuid.UUID(skill_id)
         except ValueError as error:
             raise ValueError("skill_id must be a valid UUID") from error
-        skill = await session.get(SkillSpec, parsed_id)
+        # Selected rather than fetched by primary key: an id belonging to
+        # another account must read as absent, not as forbidden, or the error
+        # itself tells the caller the skill exists.
+        skill = await session.scalar(
+            select(SkillSpec).where(
+                SkillSpec.id == parsed_id,
+                SkillSpec.group_id == group_id,
+            )
+        )
         if skill is None:
             raise ValueError(f"Skill spec {skill_id} was not found")
         if status not in {"candidate", "approved", "rejected"}:
             raise ValueError("Invalid skill status")
         skill.status = status
-        pattern = await session.get(WorkflowPattern, skill.pattern_id)
+        pattern = await session.scalar(
+            select(WorkflowPattern).where(
+                WorkflowPattern.id == skill.pattern_id,
+                WorkflowPattern.group_id == group_id,
+            )
+        )
         if pattern is not None:
             pattern.status = status
         await session.commit()
@@ -200,19 +231,21 @@ class ProceduralMemoryService:
         return skill_view(skill)
 
 
-async def list_patterns(session: AsyncSession) -> list[PatternView]:
+async def list_patterns(group_id: str, session: AsyncSession) -> list[PatternView]:
     patterns = await session.scalars(
-        select(WorkflowPattern).order_by(
-            WorkflowPattern.occurrence_count.desc(), WorkflowPattern.name
-        )
+        select(WorkflowPattern)
+        .where(WorkflowPattern.group_id == group_id)
+        .order_by(WorkflowPattern.occurrence_count.desc(), WorkflowPattern.name)
     )
     return [pattern_view(pattern) for pattern in patterns]
 
 
 async def list_skills(
-    session: AsyncSession, *, approved_only: bool = False
+    group_id: str, session: AsyncSession, *, approved_only: bool = False
 ) -> list[SkillSpecView]:
-    statement = select(SkillSpec).order_by(SkillSpec.name)
+    statement = (
+        select(SkillSpec).where(SkillSpec.group_id == group_id).order_by(SkillSpec.name)
+    )
     if approved_only:
         statement = statement.where(SkillSpec.status == "approved")
     skills = await session.scalars(statement)
@@ -220,9 +253,12 @@ async def list_skills(
 
 
 async def get_skill_by_name(
-    session: AsyncSession, name: str, *, approved_only: bool = True
+    group_id: str, session: AsyncSession, name: str, *, approved_only: bool = True
 ) -> SkillSpecView:
-    statement = select(SkillSpec).where(SkillSpec.name == name)
+    statement = select(SkillSpec).where(
+        SkillSpec.group_id == group_id,
+        SkillSpec.name == name,
+    )
     if approved_only:
         statement = statement.where(SkillSpec.status == "approved")
     skill = await session.scalar(statement)

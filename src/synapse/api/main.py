@@ -5,14 +5,14 @@ from typing import Annotated, Any
 
 import httpx
 import uvicorn
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Query
 from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from synapse.config import get_settings
 from synapse.consolidation.service import ConsolidationService
-from synapse.db.models import ConsolidationRun, Episode
+from synapse.db.models import GROUP_ID_LENGTH, ConsolidationRun, Episode
 from synapse.db.session import engine, get_session
 from synapse.episodic.service import SystemOneService
 from synapse.inference.cactus import CactusInterpreter
@@ -28,6 +28,21 @@ from synapse.recall.models import RecallResult
 from synapse.recall.service import RecallService
 from synapse.semantic.repository import load_entities, load_relationships
 from synapse.sources.mock import mock_events
+
+GroupId = Annotated[
+    str,
+    Query(
+        min_length=1,
+        max_length=GROUP_ID_LENGTH,
+        description="Account the request reads from and writes to.",
+    ),
+]
+"""Required on every route that touches account data.
+
+It has no default on purpose. A default would make the common case work without
+naming an account, and the first time someone forgot to pass one their data
+would quietly land in whichever account the default named.
+"""
 
 
 class HealthResponse(BaseModel):
@@ -158,9 +173,15 @@ async def health(session: Annotated[AsyncSession, Depends(get_session)]) -> Heal
 
 @app.get("/api/episodes", response_model=list[EpisodeResponse])
 async def list_episodes(
+    group_id: GroupId,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[EpisodeResponse]:
-    result = await session.scalars(select(Episode).order_by(Episode.occurred_at.desc()).limit(100))
+    result = await session.scalars(
+        select(Episode)
+        .where(Episode.group_id == group_id)
+        .order_by(Episode.occurred_at.desc())
+        .limit(100)
+    )
     return [
         EpisodeResponse(
             id=str(episode.id),
@@ -189,6 +210,7 @@ async def public_config() -> dict[str, Any]:
 
 @app.post("/api/demo/replay", response_model=ReplayResponse)
 async def replay_demo(
+    group_id: GroupId,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> ReplayResponse:
     service = SystemOneService(CactusInterpreter(), Mem0EpisodeStore())
@@ -196,7 +218,7 @@ async def replay_demo(
     skipped = 0
     indexed = 0
     for event in mock_events():
-        episode, created = await service.process(event, session)
+        episode, created = await service.process(event, group_id, session)
         if created:
             processed += 1
         else:
@@ -208,40 +230,45 @@ async def replay_demo(
 @app.post("/api/recall", response_model=RecallResult)
 async def recall(
     request: RecallRequest,
+    group_id: GroupId,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> RecallResult:
-    return await RecallService().recall(request.query, session)
+    return await RecallService().recall(request.query, group_id, session)
 
 
 @app.post("/api/procedural/detect", response_model=DetectionResult)
 async def detect_procedural_patterns(
+    group_id: GroupId,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> DetectionResult:
-    return await ProceduralMemoryService().detect(session)
+    return await ProceduralMemoryService().detect(group_id, session)
 
 
 @app.get("/api/procedural/patterns", response_model=list[PatternView])
 async def get_procedural_patterns(
+    group_id: GroupId,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[PatternView]:
-    return await list_patterns(session)
+    return await list_patterns(group_id, session)
 
 
 @app.get("/api/procedural/skills", response_model=list[SkillSpecView])
 async def get_procedural_skills(
+    group_id: GroupId,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[SkillSpecView]:
-    return await list_skills(session)
+    return await list_skills(group_id, session)
 
 
 @app.post("/api/procedural/skills/{skill_id}/status", response_model=SkillSpecView)
 async def update_procedural_skill_status(
     skill_id: str,
     update: SkillStatusUpdate,
+    group_id: GroupId,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> SkillSpecView:
     return await ProceduralMemoryService().set_status(
-        skill_id, update.status, session
+        skill_id, update.status, group_id, session
     )
 
 
@@ -264,28 +291,34 @@ def consolidation_response(run: ConsolidationRun) -> ConsolidationRunResponse:
 
 @app.post("/api/system2/consolidate", response_model=ConsolidationRunResponse)
 async def consolidate(
+    group_id: GroupId,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> ConsolidationRunResponse:
-    run = await ConsolidationService().run(session)
+    run = await ConsolidationService().run(group_id, session)
     return consolidation_response(run)
 
 
 @app.get("/api/system2/runs", response_model=list[ConsolidationRunResponse])
 async def list_consolidation_runs(
+    group_id: GroupId,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> list[ConsolidationRunResponse]:
     runs = await session.scalars(
-        select(ConsolidationRun).order_by(ConsolidationRun.created_at.desc()).limit(25)
+        select(ConsolidationRun)
+        .where(ConsolidationRun.group_id == group_id)
+        .order_by(ConsolidationRun.created_at.desc())
+        .limit(25)
     )
     return [consolidation_response(run) for run in runs]
 
 
 @app.get("/api/system2/graph", response_model=GraphResponse)
 async def get_graph(
+    group_id: GroupId,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> GraphResponse:
-    entities = await load_entities(session)
-    relationships = await load_relationships(session)
+    entities = await load_entities(group_id, session)
+    relationships = await load_relationships(group_id, session)
     return GraphResponse(
         nodes=[
             GraphNodeResponse(

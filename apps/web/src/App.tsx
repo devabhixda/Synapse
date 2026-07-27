@@ -133,14 +133,29 @@ const modes: Array<{ id: Mode; label: string; icon: typeof Activity }> = [
   { id: 'procedural', label: 'Procedural', icon: BrainCircuit },
 ]
 
+const MISSING_GROUP = 'Add ?group_id=<account> to the URL to choose which memory to open'
+
+// Read from the URL rather than a constant so the account is visible, shareable,
+// and never guessed on the user's behalf.
+function currentGroupId(): string {
+  return new URLSearchParams(window.location.search).get('group_id')?.trim() ?? ''
+}
+
+function scoped(path: string): string {
+  const groupId = currentGroupId()
+  if (!groupId) throw new Error(MISSING_GROUP)
+  const separator = path.includes('?') ? '&' : '?'
+  return `${path}${separator}group_id=${encodeURIComponent(groupId)}`
+}
+
 async function fetchSnapshot() {
   const [healthResponse, episodeResponse, runsResponse, graphResponse, patternsResponse, skillsResponse] = await Promise.all([
     fetch('/api/health'),
-    fetch('/api/episodes'),
-    fetch('/api/system2/runs'),
-    fetch('/api/system2/graph'),
-    fetch('/api/procedural/patterns'),
-    fetch('/api/procedural/skills'),
+    fetch(scoped('/api/episodes')),
+    fetch(scoped('/api/system2/runs')),
+    fetch(scoped('/api/system2/graph')),
+    fetch(scoped('/api/procedural/patterns')),
+    fetch(scoped('/api/procedural/skills')),
   ])
   if (!healthResponse.ok || !episodeResponse.ok || !runsResponse.ok || !graphResponse.ok || !patternsResponse.ok || !skillsResponse.ok) {
     throw new Error('The Synapse API is not ready')
@@ -205,7 +220,7 @@ function App() {
     setConsolidating(true)
     setError(null)
     try {
-      const response = await fetch('/api/system2/consolidate', { method: 'POST' })
+      const response = await fetch(scoped('/api/system2/consolidate'), { method: 'POST' })
       if (!response.ok) throw new Error('Sleep cycle failed')
       await load()
     } catch (consolidationError) {
@@ -221,7 +236,7 @@ function App() {
     setDetecting(true)
     setError(null)
     try {
-      const response = await fetch('/api/procedural/detect', { method: 'POST' })
+      const response = await fetch(scoped('/api/procedural/detect'), { method: 'POST' })
       if (!response.ok) throw new Error('Pattern detection failed')
       await load()
     } catch (detectionError) {
@@ -234,7 +249,7 @@ function App() {
   async function updateSkillStatus(skillId: string, status: string) {
     setError(null)
     try {
-      const response = await fetch(`/api/procedural/skills/${skillId}/status`, {
+      const response = await fetch(scoped(`/api/procedural/skills/${skillId}/status`), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status }),

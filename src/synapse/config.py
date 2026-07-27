@@ -22,7 +22,6 @@ class Settings(BaseSettings):
     crustdata_api_version: str = "2025-11-01"
     enrichment_cache_hours: int = Field(default=24, ge=1)
     procedural_min_occurrences: int = Field(default=2, ge=2)
-    memory_user_id: str = "local-user"
     memory_hit_threshold: float = Field(default=0.62, ge=0, le=1)
     mem0_collection: str = "synapse_episodes_gemma_1536"
 

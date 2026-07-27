@@ -14,6 +14,11 @@ from synapse.sources.slack_export import SlackExportSource
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Import a local Slack export into Synapse")
     parser.add_argument("--export-root", type=Path, required=True)
+    parser.add_argument(
+        "--group-id",
+        help="Account these messages belong to. One export maps to one account. "
+        "Required unless --dry-run, which writes nothing.",
+    )
     parser.add_argument("--channel", action="append", dest="channels")
     parser.add_argument("--max-events", type=int, default=40)
     parser.add_argument("--max-per-channel", type=int, default=30)
@@ -57,7 +62,7 @@ async def import_events(args: argparse.Namespace) -> dict[str, object]:
                 except CactusInferenceError:
                     assertion_failures += 1
             try:
-                episode, created = await system_one.process(event, session)
+                episode, created = await system_one.process(event, args.group_id, session)
             except CactusInferenceError:
                 observation_failures += 1
                 continue
@@ -77,6 +82,8 @@ async def import_events(args: argparse.Namespace) -> dict[str, object]:
 
 async def async_main() -> None:
     args = parse_args()
+    if not args.dry_run and not args.group_id:
+        raise ValueError("--group-id is required when importing")
     if args.max_events < 1:
         raise ValueError("--max-events must be at least 1")
     if args.min_score < 0:

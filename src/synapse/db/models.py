@@ -1,3 +1,21 @@
+"""Schema for episodic memory, the semantic graph, and procedural skills.
+
+Every table carries ``group_id``, the account the row belongs to. It is on all
+of them rather than only the roots so that no query has to reach through a join
+to be safe — "filter by group_id" is then a rule with no exceptions, and a
+missing filter is visible in the query itself instead of in a join two tables
+away.
+
+Which unique constraints grew a ``group_id`` follows one rule: a constraint gets
+it when its columns are not already scoped by a foreign key to a tenant-owned
+row. ``uq_semantic_entity_identity`` needs it, because two accounts can each
+have an entity called "the gateway". ``uq_relationship_evidence`` does not,
+because it keys on a relationship and an episode that are themselves already
+scoped. Adding it there would suggest the pair could otherwise collide across
+accounts, which is not true, and would leave the impression that the constraint
+is what prevents mismatched parents when nothing does.
+"""
+
 import uuid
 from datetime import datetime
 from enum import StrEnum
@@ -43,12 +61,24 @@ source_type_enum = Enum(
     values_callable=lambda members: [member.value for member in members],
 )
 
+GROUP_ID_LENGTH = 120
 
-class Episode(Base):
+
+class Tenanted:
+    """Mixin marking a table as owned by one account.
+
+    Inherit it rather than declaring the column, so that adding a table without
+    tenancy is a visible omission instead of an easy oversight.
+    """
+
+    group_id: Mapped[str] = mapped_column(String(GROUP_ID_LENGTH), index=True)
+
+
+class Episode(Tenanted, Base):
     __tablename__ = "episodes"
     __table_args__ = (
-        UniqueConstraint("source_type", "source_id", name="uq_episode_source"),
-        Index("ix_episodes_occurred_at", "occurred_at"),
+        UniqueConstraint("group_id", "source_type", "source_id", name="uq_episode_source"),
+        Index("ix_episodes_group_occurred", "group_id", "occurred_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -72,7 +102,7 @@ class Episode(Base):
     )
 
 
-class IntentObservation(Base):
+class IntentObservation(Tenanted, Base):
     __tablename__ = "intent_observations"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -93,8 +123,9 @@ class IntentObservation(Base):
     episode: Mapped[Episode] = relationship(back_populates="observations")
 
 
-class RecallEvent(Base):
+class RecallEvent(Tenanted, Base):
     __tablename__ = "recall_events"
+    __table_args__ = (Index("ix_recall_events_group_created", "group_id", "created_at"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     query: Mapped[str] = mapped_column(Text)
@@ -111,11 +142,16 @@ class RecallEvent(Base):
     )
 
 
-class WorkflowPattern(Base):
+class WorkflowPattern(Tenanted, Base):
     __tablename__ = "workflow_patterns"
+    __table_args__ = (
+        # The key is a workflow family like "status_query", so every account
+        # grows the same handful — unique per account, never globally.
+        UniqueConstraint("group_id", "key", name="uq_workflow_pattern_key"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    key: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    key: Mapped[str] = mapped_column(String(160), index=True)
     name: Mapped[str] = mapped_column(String(255))
     description: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), default="candidate", index=True)
@@ -136,14 +172,15 @@ class WorkflowPattern(Base):
     )
 
 
-class SkillSpec(Base):
+class SkillSpec(Tenanted, Base):
     __tablename__ = "skill_specs"
+    __table_args__ = (UniqueConstraint("group_id", "name", name="uq_skill_spec_name"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     pattern_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("workflow_patterns.id", ondelete="CASCADE"), unique=True, index=True
     )
-    name: Mapped[str] = mapped_column(String(160), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(160), index=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(32), default="candidate", index=True)
     purpose: Mapped[str] = mapped_column(Text)
@@ -166,7 +203,7 @@ class SkillSpec(Base):
     )
 
 
-class SkillSpecRevision(Base):
+class SkillSpecRevision(Tenanted, Base):
     __tablename__ = "skill_spec_revisions"
     __table_args__ = (
         UniqueConstraint("skill_spec_id", "version", name="uq_skill_spec_revision"),
@@ -185,7 +222,7 @@ class SkillSpecRevision(Base):
     skill_spec: Mapped[SkillSpec] = relationship(back_populates="revisions")
 
 
-class ConsolidationRun(Base):
+class ConsolidationRun(Tenanted, Base):
     __tablename__ = "consolidation_runs"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -208,7 +245,7 @@ class ConsolidationRun(Base):
     )
 
 
-class ConsolidationEpisode(Base):
+class ConsolidationEpisode(Tenanted, Base):
     __tablename__ = "consolidation_episodes"
     __table_args__ = (
         UniqueConstraint("run_id", "episode_id", name="uq_consolidation_episode"),
@@ -226,11 +263,13 @@ class ConsolidationEpisode(Base):
     episode: Mapped[Episode] = relationship()
 
 
-class SemanticEntity(Base):
+class SemanticEntity(Tenanted, Base):
     __tablename__ = "semantic_entities"
     __table_args__ = (
-        UniqueConstraint("kind", "normalized_name", name="uq_semantic_entity_identity"),
-        Index("ix_semantic_entities_name", "normalized_name"),
+        UniqueConstraint(
+            "group_id", "kind", "normalized_name", name="uq_semantic_entity_identity"
+        ),
+        Index("ix_semantic_entities_group_name", "group_id", "normalized_name"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -255,10 +294,10 @@ class SemanticEntity(Base):
     )
 
 
-class EntityAlias(Base):
+class EntityAlias(Tenanted, Base):
     __tablename__ = "entity_aliases"
     __table_args__ = (
-        UniqueConstraint("normalized_alias", name="uq_entity_alias_normalized"),
+        UniqueConstraint("group_id", "normalized_alias", name="uq_entity_alias_normalized"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -272,7 +311,7 @@ class EntityAlias(Base):
     entity: Mapped[SemanticEntity] = relationship(back_populates="aliases")
 
 
-class ExternalAttribute(Base):
+class ExternalAttribute(Tenanted, Base):
     __tablename__ = "external_attributes"
     __table_args__ = (
         UniqueConstraint(
@@ -299,13 +338,13 @@ class ExternalAttribute(Base):
     entity: Mapped[SemanticEntity] = relationship(back_populates="external_attributes")
 
 
-class SemanticRelationship(Base):
+class SemanticRelationship(Tenanted, Base):
     __tablename__ = "semantic_relationships"
     __table_args__ = (
         UniqueConstraint(
             "subject_id", "predicate", "object_id", name="uq_semantic_relationship"
         ),
-        Index("ix_semantic_relationships_predicate", "predicate"),
+        Index("ix_semantic_relationships_group_predicate", "group_id", "predicate"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -332,7 +371,7 @@ class SemanticRelationship(Base):
     )
 
 
-class RelationshipEvidence(Base):
+class RelationshipEvidence(Tenanted, Base):
     __tablename__ = "relationship_evidence"
     __table_args__ = (
         UniqueConstraint("relationship_id", "episode_id", name="uq_relationship_evidence"),
