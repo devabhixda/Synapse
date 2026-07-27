@@ -28,6 +28,9 @@ phases:
 	episode, making similar future questions faster and more direct.
 - **Evidence over confident summaries:** every semantic edge retains the Slack conversation
 	that supports it.
+- **Facts that expire instead of piling up:** when a task is reassigned or a service changes
+	hands, the old edge is closed rather than deleted, so the graph answers with what is true
+	now and can still say what used to be.
 - **Local inference:** Gemma runs through Cactus on Apple Metal; raw conversations are not sent
 	to a hosted LLM.
 - **Human-reviewed procedures:** repeated behavior can become an MCP skill, but misses never do
@@ -102,6 +105,25 @@ System 1 currently produces:
 
 These observations remain provisional. Only System 2 writes canonical entities, aliases,
 relationships, and evidence to the semantic graph.
+
+## When Facts Change
+
+A relationship holds over a period rather than forever. Consolidation stamps every edge with
+`valid_at`, taken from the conversation that asserted it, and leaves `invalid_at` empty while
+the fact is current.
+
+Some predicates only admit one answer at a time. A task has one assignee, and a service has one
+owner, so asserting a new one closes the previous edge by setting `invalid_at` to the moment the
+replacement was asserted. Predicates that legitimately accumulate — `mentions`, `depends_on`,
+`blocks` — are never closed this way, and closure is directional: `owns` retires the previous
+owner of a thing without stopping a person from owning several things.
+
+Ordering comes from the conversation, not from import order, so importing an old Slack export
+after a recent one cannot retire the newer fact. An edge asserted again after being closed
+reopens rather than duplicating.
+
+Graph reads return current edges by default. Closed edges are kept, not deleted, so history
+stays queryable, and each consolidation run reports how many edges it retired.
 
 ## What We Built
 

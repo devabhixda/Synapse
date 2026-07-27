@@ -339,12 +339,29 @@ class ExternalAttribute(Tenanted, Base):
 
 
 class SemanticRelationship(Tenanted, Base):
+    """A subject-predicate-object edge, true over a period rather than forever.
+
+    ``valid_at`` is when the edge became true — the time of the episode that
+    asserted it, not the time it was written down. ``invalid_at`` is when it
+    stopped; ``None`` means it still holds. A contradicting assertion closes
+    the earlier edge instead of deleting it, so "who owns this?" and "who owned
+    it in March?" are both answerable.
+
+    Only predicates that genuinely replace their predecessor are closed this
+    way; see ``SUBJECT_FUNCTIONAL`` and ``OBJECT_FUNCTIONAL`` in the
+    consolidation service. A subject can block many things at once, and
+    retiring those would erase history that is still true.
+    """
+
     __tablename__ = "semantic_relationships"
     __table_args__ = (
         UniqueConstraint(
             "subject_id", "predicate", "object_id", name="uq_semantic_relationship"
         ),
         Index("ix_semantic_relationships_group_predicate", "group_id", "predicate"),
+        # Reads default to current edges, so the common query is
+        # group_id + invalid_at IS NULL.
+        Index("ix_semantic_relationships_group_current", "group_id", "invalid_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -357,6 +374,10 @@ class SemanticRelationship(Tenanted, Base):
     )
     attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    valid_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    invalid_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

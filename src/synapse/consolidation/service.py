@@ -20,6 +20,22 @@ from synapse.db.models import (
 )
 from synapse.enrichment.crustdata import CompanyEnricher, CrustdataEnricher
 
+# Predicates where a later assertion replaces an earlier one instead of adding
+# to it. Everything else accumulates: a blocker can block several things and a
+# system can depend on many others at once, so closing those would delete
+# history that is still true. Being wrong in this direction is expensive —
+# a wrongly retired edge is a fact the graph can no longer state — so the sets
+# stay small and only hold predicates that are functional by their own meaning.
+SUBJECT_FUNCTIONAL = frozenset({"assigned_to"})
+"""One object per subject: a task has a single assignee at a time."""
+
+OBJECT_FUNCTIONAL = frozenset({"owns"})
+"""One subject per object: a thing has a single owner at a time.
+
+``owns`` points from person to thing, so the constraint is on the object. A
+person owns many tasks; a task is owned by one person.
+"""
+
 
 class ConsolidationService:
     def __init__(
@@ -198,9 +214,20 @@ class ConsolidationService:
             episode_by_source_id = {
                 episode.source_id: episode for episode in episodes if episode.source_id
             }
+            superseded_relationships = 0
             for relationship_spec in plan.relationships:
                 subject = entity_by_key[relationship_spec.subject_key]
                 object_entity = entity_by_key[relationship_spec.object_key]
+                # When the edge became true, which is when the conversation
+                # happened — not when consolidation got round to reading it.
+                # Ordering supersession by write time would let a late import
+                # of old messages retire a newer fact.
+                evidence_times = [
+                    episode.occurred_at
+                    for source_id in relationship_spec.evidence_source_ids
+                    if (episode := episode_by_source_id.get(source_id)) is not None
+                ]
+                asserted_at = max(evidence_times) if evidence_times else datetime.now(UTC)
                 relationship = await session.scalar(
                     select(SemanticRelationship)
                     .options(selectinload(SemanticRelationship.evidence))
@@ -219,6 +246,7 @@ class ConsolidationService:
                         object_id=object_entity.id,
                         attributes=relationship_spec.attributes,
                         confidence=relationship_spec.confidence,
+                        valid_at=asserted_at,
                     )
                     session.add(relationship)
                     created_relationships += 1
@@ -231,11 +259,21 @@ class ConsolidationService:
                     relationship.confidence = max(
                         relationship.confidence, relationship_spec.confidence
                     )
+                    if relationship.invalid_at is not None:
+                        # Asserted again after being retired: the edge is true
+                        # once more, and true as of this assertion rather than
+                        # the original one.
+                        relationship.invalid_at = None
+                        relationship.valid_at = asserted_at
                     updated_relationships += 1
                     evidence_episode_ids = {
                         item.episode_id for item in relationship.evidence
                     }
                 await session.flush()
+
+                superseded_relationships += await self._supersede_contradicted(
+                    relationship, group_id, asserted_at, session
+                )
 
                 for source_id in relationship_spec.evidence_source_ids:
                     episode = episode_by_source_id.get(source_id)
@@ -260,6 +298,7 @@ class ConsolidationService:
                 "entities_updated": updated_entities,
                 "relationships_created": created_relationships,
                 "relationships_updated": updated_relationships,
+                "relationships_superseded": superseded_relationships,
                 "enrichments_created": created_enrichments,
                 "enrichments_updated": updated_enrichments,
                 "enrichments_skipped": skipped_enrichments,
@@ -289,3 +328,45 @@ class ConsolidationService:
                 failed_run.completed_at = datetime.now(UTC)
                 await session.commit()
             raise
+
+    async def _supersede_contradicted(
+        self,
+        relationship: SemanticRelationship,
+        group_id: str,
+        asserted_at: datetime,
+        session: AsyncSession,
+    ) -> int:
+        """Close open edges the new one contradicts. Returns how many.
+
+        Only edges that were already true when this one was asserted are
+        closed. An assertion cannot retire something that started later than
+        it, which matters when an old export is imported after a newer one.
+        """
+        predicate = relationship.predicate
+        if predicate in SUBJECT_FUNCTIONAL:
+            conflict = (
+                SemanticRelationship.subject_id == relationship.subject_id,
+                SemanticRelationship.object_id != relationship.object_id,
+            )
+        elif predicate in OBJECT_FUNCTIONAL:
+            conflict = (
+                SemanticRelationship.object_id == relationship.object_id,
+                SemanticRelationship.subject_id != relationship.subject_id,
+            )
+        else:
+            return 0
+
+        contradicted = list(
+            await session.scalars(
+                select(SemanticRelationship).where(
+                    SemanticRelationship.group_id == group_id,
+                    SemanticRelationship.predicate == predicate,
+                    SemanticRelationship.invalid_at.is_(None),
+                    SemanticRelationship.valid_at <= asserted_at,
+                    *conflict,
+                )
+            )
+        )
+        for edge in contradicted:
+            edge.invalid_at = asserted_at
+        return len(contradicted)
