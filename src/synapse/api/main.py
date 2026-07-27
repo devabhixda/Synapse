@@ -15,7 +15,7 @@ from synapse.consolidation.service import ConsolidationService
 from synapse.db.models import GROUP_ID_LENGTH, ConsolidationRun, Episode
 from synapse.db.session import engine, get_session
 from synapse.episodic.service import SystemOneService
-from synapse.inference.cactus import CactusInterpreter
+from synapse.inference.chat import LLMInterpreter
 from synapse.memory.mem0_store import Mem0EpisodeStore
 from synapse.procedural.models import (
     DetectionResult,
@@ -48,7 +48,7 @@ would quietly land in whichever account the default named.
 class HealthResponse(BaseModel):
     status: str
     database: str
-    cactus: str
+    inference: str
     models: dict[str, str]
 
 
@@ -142,13 +142,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="Synapse API", version="0.1.0", lifespan=lifespan)
 
 
-async def cactus_status() -> str:
+async def inference_status() -> str:
     settings = get_settings()
     try:
         async with httpx.AsyncClient(timeout=1.5) as client:
             responses = await asyncio.gather(
-                client.get(f"{settings.cactus_chat_base_url.rstrip('/')}/models"),
-                client.get(f"{settings.cactus_embedding_base_url.rstrip('/')}/models"),
+                client.get(f"{settings.chat_base_url.rstrip('/')}/models"),
+                client.get(f"{settings.embedding_base_url.rstrip('/')}/models"),
             )
             for response in responses:
                 response.raise_for_status()
@@ -161,14 +161,14 @@ async def cactus_status() -> str:
 async def health(session: Annotated[AsyncSession, Depends(get_session)]) -> HealthResponse:
     await session.execute(text("SELECT 1"))
     settings = get_settings()
-    cactus = await cactus_status()
+    inference = await inference_status()
     return HealthResponse(
-        status="ok" if cactus == "available" else "degraded",
+        status="ok" if inference == "available" else "degraded",
         database="available",
-        cactus=cactus,
+        inference=inference,
         models={
-            "chat": settings.cactus_chat_model,
-            "embedding": settings.cactus_embedding_model,
+            "chat": settings.chat_model,
+            "embedding": settings.embedding_model,
         },
     )
 
@@ -205,8 +205,8 @@ async def public_config() -> dict[str, Any]:
     return {
         "memory_hit_threshold": settings.memory_hit_threshold,
         "embedding_dimensions": settings.embedding_dimensions,
-        "chat_model": settings.cactus_chat_model,
-        "embedding_model": settings.cactus_embedding_model,
+        "chat_model": settings.chat_model,
+        "embedding_model": settings.embedding_model,
     }
 
 
@@ -215,7 +215,7 @@ async def replay_demo(
     group_id: GroupId,
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> ReplayResponse:
-    service = SystemOneService(CactusInterpreter(), Mem0EpisodeStore())
+    service = SystemOneService(LLMInterpreter(), Mem0EpisodeStore())
     processed = 0
     skipped = 0
     indexed = 0

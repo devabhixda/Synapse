@@ -9,8 +9,8 @@ x-backend: &backend
       required: false
   environment:
     DATABASE_URL: postgresql+asyncpg://synapse:synapse@db:5432/synapse
-    CACTUS_CHAT_BASE_URL: ${CACTUS_CHAT_BASE_URL:-http://host.docker.internal:8080/v1}
-    CACTUS_EMBEDDING_BASE_URL: ${CACTUS_EMBEDDING_BASE_URL:-http://host.docker.internal:8080/v1}
+    CHAT_BASE_URL: ${CHAT_BASE_URL:-http://host.docker.internal:8080/v1}
+    EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://host.docker.internal:8080/v1}
   extra_hosts:
     - host.docker.internal:host-gateway
 
@@ -90,8 +90,8 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql+asyncpg://synapse:synapse@db:5432/synapse_test
-      CACTUS_CHAT_BASE_URL: ${CACTUS_CHAT_BASE_URL:-http://host.docker.internal:8080/v1}
-      CACTUS_EMBEDDING_BASE_URL: ${CACTUS_EMBEDDING_BASE_URL:-http://host.docker.internal:8080/v1}
+      CHAT_BASE_URL: ${CHAT_BASE_URL:-http://host.docker.internal:8080/v1}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://host.docker.internal:8080/v1}
     profiles: [test]
 
 volumes:

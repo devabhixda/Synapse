@@ -31,18 +31,18 @@ class Mem0EpisodeStore:
                     "embedder": {
                         "provider": "openai",
                         "config": {
-                            "model": settings.cactus_embedding_model,
-                            "api_key": "cactus-local",
-                            "openai_base_url": settings.cactus_embedding_base_url,
+                            "model": settings.embedding_model,
+                            "api_key": settings.embedding_api_key,
+                            "openai_base_url": settings.embedding_base_url,
                             "embedding_dims": settings.embedding_dimensions,
                         },
                     },
                     "llm": {
                         "provider": "openai",
                         "config": {
-                            "model": settings.cactus_chat_model,
-                            "api_key": "cactus-local",
-                            "openai_base_url": settings.cactus_chat_base_url,
+                            "model": settings.chat_model,
+                            "api_key": settings.chat_api_key,
+                            "openai_base_url": settings.chat_base_url,
                         },
                     },
                 }

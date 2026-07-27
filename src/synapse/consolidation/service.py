@@ -4,9 +4,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from synapse.config import get_settings
+from synapse.config import Settings, get_settings
 from synapse.consolidation.extractor import normalize_name
-from synapse.consolidation.llm_extractor import GemmaSemanticExtractor, SemanticExtractor
+from synapse.consolidation.llm_extractor import LLMSemanticExtractor, SemanticExtractor
 from synapse.db.models import (
     ConsolidationEpisode,
     ConsolidationRun,
@@ -42,9 +42,11 @@ class ConsolidationService:
         self,
         extractor: SemanticExtractor | None = None,
         enricher: CompanyEnricher | None = None,
+        settings: Settings | None = None,
     ) -> None:
-        self.extractor = extractor or GemmaSemanticExtractor()
-        self.enricher = enricher or CrustdataEnricher()
+        resolved = settings or get_settings()
+        self.extractor = extractor or LLMSemanticExtractor(resolved)
+        self.enricher = enricher or CrustdataEnricher(resolved)
 
     async def run(self, group_id: str, session: AsyncSession) -> ConsolidationRun:
         run = ConsolidationRun(

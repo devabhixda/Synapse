@@ -31,8 +31,9 @@ phases:
 - **Facts that expire instead of piling up:** when a task is reassigned or a service changes
 	hands, the old edge is closed rather than deleted, so the graph answers with what is true
 	now and can still say what used to be.
-- **Local inference:** Gemma runs through Cactus on Apple Metal; raw conversations are not sent
-	to a hosted LLM.
+- **Local inference by default, not by assumption:** Gemma runs through Cactus on Apple Metal,
+	so raw conversations are not sent to a hosted LLM. Nothing below the settings knows that —
+	inference is two OpenAI-compatible endpoints, and pointing them elsewhere is configuration.
 - **Human-reviewed procedures:** repeated behavior can become an MCP skill, but misses never do
 	and candidates remain private until approved.
 - **Agent boundary:** Synapse supplies context and procedure; VS Code/Copilot owns code edits,
@@ -140,7 +141,7 @@ stays queryable, and each consolidation run reports how many edges it retired.
 
 | Layer | Technology |
 | --- | --- |
-| Local AI | Cactus, Gemma 4 E2B, Apple Metal |
+| Inference | Any OpenAI-compatible endpoint; Cactus, Gemma 4 E2B, Apple Metal by default |
 | Episodic memory | Mem0 OSS |
 | Durable storage | PostgreSQL 18, pgvector, SQLAlchemy, Alembic |
 | API and agents | FastAPI, MCP Python SDK v1 |
@@ -339,6 +340,41 @@ running, health reports degraded and `INFERENCE_MODE=auto` refuses to store a fa
 System 1 observation. Use `INFERENCE_MODE=fake` only when deterministic interpretation is
 explicitly desired.
 
+## Using a Different Model Server
+
+Inference is addressed as two OpenAI-compatible endpoints rather than as a named provider.
+Chat and embeddings are configured apart because they are not always the same service — a
+gateway that serves chat may serve no embedding model at all.
+
+| Setting | What it addresses |
+| --- | --- |
+| `CHAT_BASE_URL`, `CHAT_MODEL`, `CHAT_API_KEY` | Classification, assertion extraction, answerability, alias adjudication |
+| `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_API_KEY`, `EMBEDDING_DIMENSIONS` | The Mem0 episode index |
+
+The defaults are a local Cactus for both, which ignores the key, so `cactus-local` stands in
+for one. A hosted endpoint checks it.
+
+Embedded in another application, the same values can be passed at construction instead of
+read from the environment. Every service takes a `Settings`, and passes it to whatever it
+builds:
+
+```python
+settings = Settings(
+    chat_base_url="https://inference.example.com/v1",
+    chat_model="openai/gpt-oss-120b",
+    chat_api_key=key,
+    embedding_base_url="https://embeddings.example.com/v1",
+    embedding_dimensions=1024,
+    embedding_api_key=key,
+)
+system_one = SystemOneService(LLMInterpreter(settings), Mem0EpisodeStore(settings))
+recall = RecallService(settings=settings)
+```
+
+Changing `EMBEDDING_MODEL` or `EMBEDDING_DIMENSIONS` invalidates an existing index — vectors
+from two models are not comparable — so give the new one its own `MEM0_COLLECTION` and
+re-index rather than mixing them.
+
 ## API
 
 Every route that touches stored memory requires a `group_id` query parameter naming
@@ -355,7 +391,7 @@ before running `alembic upgrade head` to pick the name; changing it afterwards i
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/health` | PostgreSQL and Cactus availability plus active models |
+| `GET` | `/api/health` | PostgreSQL and model-server availability plus active models |
 | `GET` | `/api/config` | Public model, embedding dimension, and retrieval threshold |
 | `GET` | `/api/episodes?group_id=` | Latest persisted episodes and Mem0 indexing state |
 | `POST` | `/api/demo/replay?group_id=` | Idempotently process and reconcile the mock event stream |
@@ -377,7 +413,7 @@ The MCP tools take `group_id` the same way: `recall`, `get_episode`,
 | --- | --- |
 | `db` | PostgreSQL 18 and pgvector |
 | `migrate` | One-shot Alembic schema upgrade |
-| `api` | FastAPI, System 1, Cactus client, and Mem0 |
+| `api` | FastAPI, System 1, the chat client, and Mem0 |
 | `worker` | Background worker process and database heartbeat |
 | `web` | nginx-hosted React build and `/api` proxy |
 | `mcp` | On-demand stdio MCP server for VS Code |

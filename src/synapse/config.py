@@ -1,3 +1,16 @@
+"""Configuration, including which model server answers each kind of call.
+
+Inference is addressed as two OpenAI-compatible endpoints — one for chat, one
+for embeddings — rather than as a named provider. The defaults point at a local
+Cactus serving Gemma, which is how the project is meant to be run, but nothing
+below the settings knows that: pointing the URLs at a hosted gateway and
+supplying its key is the whole of what switching providers involves.
+
+Chat and embeddings are configured separately because they are not always the
+same service. A gateway that serves chat may serve no embedding model at all,
+leaving embeddings to a second deployment with its own URL, key, and dimension.
+"""
+
 from functools import lru_cache
 
 from pydantic import Field
@@ -10,10 +23,14 @@ class Settings(BaseSettings):
     app_name: str = "Synapse"
     environment: str = "development"
     database_url: str = "postgresql+asyncpg://synapse:synapse@localhost:5432/synapse"
-    cactus_chat_base_url: str = "http://localhost:8080/v1"
-    cactus_embedding_base_url: str = "http://localhost:8080/v1"
-    cactus_chat_model: str = "google/gemma-4-E2B-it"
-    cactus_embedding_model: str = "google/gemma-4-E2B-it"
+    chat_base_url: str = "http://localhost:8080/v1"
+    embedding_base_url: str = "http://localhost:8080/v1"
+    chat_model: str = "google/gemma-4-E2B-it"
+    embedding_model: str = "google/gemma-4-E2B-it"
+    # A local Cactus ignores the bearer token, so the default is a placeholder
+    # rather than a secret. A hosted endpoint checks it.
+    chat_api_key: str = "cactus-local"
+    embedding_api_key: str = "cactus-local"
     embedding_dimensions: int = 1536
     inference_mode: str = "auto"
     consolidation_mode: str = "auto"

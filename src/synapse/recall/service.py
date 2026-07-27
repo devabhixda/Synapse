@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from synapse.config import Settings, get_settings
 from synapse.db.models import Episode, EpisodeKind, IntentObservation, RecallEvent, SourceType
 from synapse.memory.mem0_store import Mem0EpisodeStore
 from synapse.recall.answerability import EpisodeAnswerabilityJudge
@@ -33,9 +34,11 @@ class RecallService:
         self,
         memory_store: Mem0EpisodeStore | None = None,
         judge: EpisodeAnswerabilityJudge | None = None,
+        settings: Settings | None = None,
     ) -> None:
-        self.memory_store = memory_store or Mem0EpisodeStore()
-        self.judge = judge or EpisodeAnswerabilityJudge()
+        resolved = settings or get_settings()
+        self.memory_store = memory_store or Mem0EpisodeStore(resolved)
+        self.judge = judge or EpisodeAnswerabilityJudge(resolved)
 
     async def recall(self, query: str, group_id: str, session: AsyncSession) -> RecallResult:
         started = time.perf_counter()

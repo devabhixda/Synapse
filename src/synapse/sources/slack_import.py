@@ -5,8 +5,8 @@ from pathlib import Path
 
 from synapse.db.session import engine, session_factory
 from synapse.episodic.service import SystemOneService
-from synapse.inference.assertions import CactusAssertionInterpreter
-from synapse.inference.cactus import CactusInferenceError, CactusInterpreter
+from synapse.inference.assertions import LLMAssertionInterpreter
+from synapse.inference.chat import InferenceError, LLMInterpreter
 from synapse.memory.mem0_store import Mem0EpisodeStore
 from synapse.sources.slack_export import SlackExportSource
 
@@ -45,8 +45,8 @@ async def import_events(args: argparse.Namespace) -> dict[str, object]:
         min_score=args.min_score,
         max_per_channel=args.max_per_channel,
     )
-    system_one = SystemOneService(CactusInterpreter(), Mem0EpisodeStore())
-    assertion_interpreter = CactusAssertionInterpreter()
+    system_one = SystemOneService(LLMInterpreter(), Mem0EpisodeStore())
+    assertion_interpreter = LLMAssertionInterpreter()
     processed = 0
     skipped = 0
     indexed = 0
@@ -59,11 +59,11 @@ async def import_events(args: argparse.Namespace) -> dict[str, object]:
                 try:
                     assertions = await assertion_interpreter.extract(event)
                     event.metadata["semantic_assertions"] = assertions.model_dump(mode="json")
-                except CactusInferenceError:
+                except InferenceError:
                     assertion_failures += 1
             try:
                 episode, created = await system_one.process(event, args.group_id, session)
-            except CactusInferenceError:
+            except InferenceError:
                 observation_failures += 1
                 continue
             processed += int(created)
