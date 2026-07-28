@@ -4,7 +4,12 @@ import httpx
 from pydantic import ValidationError
 
 from synapse.config import Settings, get_settings
-from synapse.inference.chat import chat_completion, message_content, parse_json_object
+from synapse.inference.chat import (
+    InferenceError,
+    chat_completion,
+    message_content,
+    parse_json_object,
+)
 from synapse.recall.models import EpisodeSelection
 
 SYSTEM_PROMPT = """Decide whether one supplied episode directly answers the user's query.
@@ -67,7 +72,17 @@ class EpisodeAnswerabilityJudge:
             selection = EpisodeSelection.model_validate(
                 parse_json_object(message_content(body))
             )
-        except (httpx.HTTPError, KeyError, TypeError, ValueError, ValidationError):
+        except (
+            httpx.HTTPError,
+            InferenceError,
+            KeyError,
+            TypeError,
+            ValueError,
+            ValidationError,
+        ):
+            # A judge that cannot answer is not a judge that says no: recall
+            # falls through to the graph, which is the right move when the
+            # episodic path could not be evaluated at all.
             return EpisodeSelection(answerable=False, confidence=0.0)
 
         candidate_ids = {str(candidate["episode_id"]) for candidate in candidates}

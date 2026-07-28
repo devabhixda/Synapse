@@ -58,6 +58,11 @@ async def chat_completion(
 ) -> dict[str, Any]:
     """One JSON-mode completion against the configured chat endpoint.
 
+    ``max_tokens`` is what the caller needs for the answer; a reasoning model
+    also bills its thinking against it, so ``chat_reasoning_tokens`` is added on
+    top rather than the caller having to know which kind of model it is talking
+    to.
+
     Returns the raw response body; callers pull the message content out
     themselves because they disagree about what a malformed one means.
     """
@@ -68,7 +73,7 @@ async def chat_completion(
                 "model": settings.chat_model,
                 "messages": messages,
                 "temperature": temperature,
-                "max_tokens": max_tokens,
+                "max_tokens": max_tokens + settings.chat_reasoning_tokens,
                 "response_format": {"type": "json_object"},
             },
             headers={"Authorization": f"Bearer {settings.chat_api_key}"},
@@ -79,8 +84,24 @@ async def chat_completion(
 
 
 def message_content(body: dict[str, Any]) -> str:
-    content: str = body["choices"][0]["message"]["content"]
-    return content
+    """The assistant's text, or an explanation of why there isn't any.
+
+    A reasoning model that runs out of budget mid-thought returns a well-formed
+    response whose content is ``null``, which otherwise surfaces several frames
+    later as an ``AttributeError`` on ``NoneType`` and sends whoever reads the
+    log looking in the wrong place.
+    """
+    choice = body["choices"][0]
+    content = choice["message"].get("content")
+    if content:
+        return str(content)
+    reason = choice.get("finish_reason")
+    if reason == "length":
+        raise InferenceError(
+            "the model spent its whole completion budget without answering; "
+            "raise chat_reasoning_tokens if it is a reasoning model"
+        )
+    raise InferenceError(f"the model returned no content (finish_reason={reason})")
 
 
 class LLMInterpreter:
