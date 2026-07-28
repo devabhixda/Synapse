@@ -11,6 +11,7 @@ x-backend: &backend
     DATABASE_URL: postgresql+asyncpg://synapse:synapse@db:5432/synapse
     CHAT_BASE_URL: ${CHAT_BASE_URL:-http://host.docker.internal:8080/v1}
     EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://host.docker.internal:8080/v1}
+    CHAT_REASONING_TOKENS: ${CHAT_REASONING_TOKENS:-0}
   extra_hosts:
     - host.docker.internal:host-gateway
 

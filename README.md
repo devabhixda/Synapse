@@ -349,6 +349,7 @@ gateway that serves chat may serve no embedding model at all.
 | Setting | What it addresses |
 | --- | --- |
 | `CHAT_BASE_URL`, `CHAT_MODEL`, `CHAT_API_KEY` | Classification, assertion extraction, answerability, alias adjudication |
+| `CHAT_REASONING_TOKENS` | Extra completion budget, for a model that thinks before it answers |
 | `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_API_KEY`, `EMBEDDING_DIMENSIONS` | The Mem0 episode index |
 
 The defaults are a local Cactus for both, which ignores the key, so `cactus-local` stands in
@@ -363,6 +364,7 @@ settings = Settings(
     chat_base_url="https://inference.example.com/v1",
     chat_model="openai/gpt-oss-120b",
     chat_api_key=key,
+    chat_reasoning_tokens=2048,
     embedding_base_url="https://embeddings.example.com/v1",
     embedding_dimensions=1024,
     embedding_api_key=key,
@@ -370,6 +372,19 @@ settings = Settings(
 system_one = SystemOneService(LLMInterpreter(settings), Mem0EpisodeStore(settings))
 recall = RecallService(settings=settings)
 ```
+
+### Reasoning models need more room
+
+Each call asks for as many tokens as its answer needs — 48 for a classification, 140 for an
+assertion — because that is the whole cost on a model that answers directly. A reasoning
+model bills its private thinking against the same budget and can spend all of it before
+writing a character, and the failure is quiet: the request succeeds, `finish_reason` is
+`length`, and `content` is `null`.
+
+`CHAT_REASONING_TOKENS` is added to every call's budget, leaving the per-call sizes alone. A
+few thousand is a reasonable starting point. It costs nothing on a model that doesn't reason,
+which stops when it is done rather than when it hits the cap. Leave it out and the first call
+raises an `InferenceError` that names it.
 
 Changing `EMBEDDING_MODEL` or `EMBEDDING_DIMENSIONS` invalidates an existing index — vectors
 from two models are not comparable — so give the new one its own `MEM0_COLLECTION` and

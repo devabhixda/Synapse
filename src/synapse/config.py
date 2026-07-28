@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     chat_api_key: str = "cactus-local"
     embedding_api_key: str = "cactus-local"
     embedding_dimensions: int = 1536
+    # Extra completion budget for models that think before answering. Every
+    # call site sizes its own budget for the answer it expects, which is all a
+    # model like Gemma spends tokens on. A reasoning model bills its private
+    # reasoning against the same budget and can exhaust it before writing a
+    # single character, so those budgets need to be raised — by a lot, and
+    # without changing what each call site asks for. Set this to a few thousand
+    # when pointing at one; it costs nothing on a model that doesn't reason,
+    # which stops when it is done rather than when it hits the cap.
+    chat_reasoning_tokens: int = Field(default=0, ge=0)
     inference_mode: str = "auto"
     consolidation_mode: str = "auto"
     crustdata_api_key: str | None = None

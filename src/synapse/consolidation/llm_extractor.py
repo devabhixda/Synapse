@@ -20,7 +20,12 @@ from synapse.consolidation.models import (
     RelationshipSpec,
 )
 from synapse.db.models import Episode
-from synapse.inference.chat import chat_completion, message_content, parse_json_object
+from synapse.inference.chat import (
+    InferenceError,
+    chat_completion,
+    message_content,
+    parse_json_object,
+)
 
 ALLOWED_ENTITY_KINDS = {
     "Person",
@@ -64,7 +69,14 @@ class LLMSemanticExtractor:
             return ExtractionResult(
                 plan=candidate, provider=f"{self.settings.chat_model}-system2"
             )
-        except (httpx.HTTPError, KeyError, TypeError, ValueError, ValidationError) as error:
+        except (
+            httpx.HTTPError,
+            InferenceError,
+            KeyError,
+            TypeError,
+            ValueError,
+            ValidationError,
+        ) as error:
             return ExtractionResult(
                 plan=candidate,
                 provider="deterministic-system2-fallback",
