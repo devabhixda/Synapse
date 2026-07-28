@@ -3,6 +3,20 @@
 **A local-first cognitive memory layer that turns scattered workplace conversations into
 episodic memories, evidence-backed knowledge graphs, and reusable agent workflows.**
 
+## Install
+
+```bash
+pip install synapse-recall
+```
+
+The distribution is `synapse-recall` because `synapse` and `synapse-memory` were already
+taken on PyPI by unrelated projects; the import is `synapse`. Embedding it in another
+application needs nothing but a Postgres with pgvector and two OpenAI-compatible
+endpoints — see [Using a Different Model Server](#using-a-different-model-server).
+
+To run the whole thing instead, including the API and the workbench, clone the repo and
+use Compose as described under [Run Locally](#run-locally).
+
 ## Demo Video
 
 [Watch the Synapse demo on Loom](https://www.loom.com/share/219bf4ea14e849dd81a5ed1c45c57000)
@@ -271,7 +285,7 @@ curl --fail "http://localhost:3000/api/recall?group_id=demo" \
 
 ### Use MCP in VS Code
 
-VS Code discovers the `synapse-memory` server from `.vscode/mcp.json`. The configuration
+VS Code discovers the `synapse-recall` server from `.vscode/mcp.json`. The configuration
 launches the current server image with:
 
 ```sh
@@ -282,7 +296,7 @@ Keep native Cactus and the Docker stack running, then:
 
 1. Open the Command Palette with `Cmd+Shift+P`.
 2. Run **MCP: List Servers**.
-3. Select `synapse-memory` and start or restart it.
+3. Select `synapse-recall` and start or restart it.
 4. Open Copilot Chat in Agent mode.
 5. Enable the Synapse tools in the tools picker if they are not already enabled.
 
@@ -296,7 +310,7 @@ Available tools:
 With the public fallback dataset, example agent prompts are:
 
 ```text
-Use the synapse-memory recall tool to compare the team decisions about Random Labs,
+Use the synapse-recall recall tool to compare the team decisions about Random Labs,
 Hexclave, Channel3, and Allus AI. Include the evidence citations.
 ```
 
@@ -312,7 +326,7 @@ do not contain the answer, it is `semantic_fallback` and `created_episode_id` id
 new retrieval episode. A similar later request should return `episodic` with
 `memory_kind: retrieval` in `score_details`.
 
-After changing MCP code, use **MCP: List Servers → synapse-memory → Restart Server**. If
+After changing MCP code, use **MCP: List Servers → synapse-recall → Restart Server**. If
 the server is not listed, run **Developer: Reload Window**. Running the Compose MCP command
 manually will appear idle because the process is waiting for protocol messages on stdin.
 

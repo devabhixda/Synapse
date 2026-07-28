@@ -1,7 +1,23 @@
 [project]
-name = "synapse-memory"
+# `synapse` and `synapse-memory` are taken on PyPI by unrelated projects, and
+# PyPI refuses `synapse-mem` as too close to the latter. This is the
+# distribution name only; the import stays `synapse`.
+name = "synapse-recall"
 version = "0.1.0"
-description = "Fast-and-slow organizational memory POC"
+description = "Episodic and semantic memory over workplace conversations"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Abhi Jain" }]
+keywords = ["memory", "knowledge-graph", "episodic", "rag", "agents"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Typing :: Typed",
+]
 requires-python = ">=3.12"
 dependencies = [
   "alembic>=1.16,<2",
@@ -25,6 +41,11 @@ dev = [
   "pytest-asyncio>=1.1,<2",
   "ruff>=0.12,<1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/devabhixda/Synapse"
+Source = "https://github.com/devabhixda/Synapse"
+Issues = "https://github.com/devabhixda/Synapse/issues"
 
 [project.scripts]
 synapse-api = "synapse.api.main:run"

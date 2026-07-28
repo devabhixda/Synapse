@@ -1,0 +1,46 @@
+# Publish to PyPI when a GitHub release is published.
+#
+# No API token exists anywhere: PyPI is configured to trust this specific
+# workflow in this specific repository, and the upload is authenticated by a
+# short-lived OIDC token GitHub mints for the job. That is why `id-token: write`
+# is granted here and nowhere else, and why the job is otherwise given nothing.
+#
+# Building and publishing are separate jobs so the artifact is produced by a job
+# with no credentials at all, and the job that can publish only ever downloads
+# it.
+
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # Named on PyPI's side too, so a trusted publish can only come from a run
+    # that entered this environment.
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

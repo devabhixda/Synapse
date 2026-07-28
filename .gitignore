@@ -7,6 +7,8 @@ __pycache__/
 *.pyc
 apps/web/node_modules/
 apps/web/dist/
+# Python build artifacts, produced by `python -m build` before a release.
+/dist/
 test-results/
 playwright-report/
 slack-exports/
