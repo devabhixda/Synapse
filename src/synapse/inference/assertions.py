@@ -12,7 +12,12 @@ from synapse.domain.models import (
     SemanticRelationshipAssertion,
     SourceEvent,
 )
-from synapse.inference.cactus import CactusInferenceError, parse_json_object
+from synapse.inference.chat import (
+    InferenceError,
+    chat_completion,
+    message_content,
+    parse_json_object,
+)
 
 SYSTEM_PROMPT = """Extract the single strongest explicit organizational relationship from
 one work conversation. Return exactly one flat JSON object with: supported (boolean),
@@ -65,39 +70,30 @@ class CompactAssertion(BaseModel):
     confidence: float = Field(default=0.0, ge=0, le=1)
 
 
-class CactusAssertionInterpreter:
+class LLMAssertionInterpreter:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
 
     async def extract(self, event: SourceEvent) -> SemanticAssertions:
-        request = {
-            "model": self.settings.cactus_chat_model,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": (
-                        "Participants: "
-                        + json.dumps(event.participants, separators=(",", ":"))
-                        + "\nConversation:\n"
-                        + event.content
-                    ),
-                },
-            ],
-            "temperature": 0.1,
-            "max_tokens": 140,
-            "response_format": {"type": "json_object"},
-        }
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.post(
-                    f"{self.settings.cactus_chat_base_url.rstrip('/')}/chat/completions",
-                    json=request,
-                    headers={"Authorization": "Bearer cactus-local"},
-                )
-                response.raise_for_status()
-            body = response.json()
-            content = body["choices"][0]["message"]["content"]
+            body = await chat_completion(
+                self.settings,
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": (
+                            "Participants: "
+                            + json.dumps(event.participants, separators=(",", ":"))
+                            + "\nConversation:\n"
+                            + event.content
+                        ),
+                    },
+                ],
+                max_tokens=140,
+                timeout=30,
+            )
+            content = message_content(body)
             try:
                 payload = parse_json_object(content)
             except (ValueError, json.JSONDecodeError):
@@ -115,7 +111,7 @@ class CactusAssertionInterpreter:
             ValueError,
             ValidationError,
         ) as error:
-            raise CactusInferenceError(
+            raise InferenceError(
                 f"Semantic assertion extraction failed for {event.source_id}: {error}"
             ) from error
         if not assertion.supported:
@@ -128,7 +124,7 @@ class CactusAssertionInterpreter:
             assertion.object_name,
         )
         if not all(value.strip() for value in required_values):
-            raise CactusInferenceError(
+            raise InferenceError(
                 f"Semantic assertion extraction returned incomplete data for {event.source_id}"
             )
         subject_kind = normalize_kind(assertion.subject_kind)

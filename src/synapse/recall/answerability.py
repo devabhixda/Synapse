@@ -4,7 +4,7 @@ import httpx
 from pydantic import ValidationError
 
 from synapse.config import Settings, get_settings
-from synapse.inference.cactus import parse_json_object
+from synapse.inference.chat import chat_completion, message_content, parse_json_object
 from synapse.recall.models import EpisodeSelection
 
 SYSTEM_PROMPT = """Decide whether one supplied episode directly answers the user's query.
@@ -48,33 +48,25 @@ class EpisodeAnswerabilityJudge:
     ) -> EpisodeSelection:
         if not candidates:
             return EpisodeSelection(answerable=False, confidence=1.0)
-        request = {
-            "model": self.settings.cactus_chat_model,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": "Query: "
-                    + query
-                    + "\nEpisodes: "
-                    + json.dumps(candidates, separators=(",", ":")),
-                },
-            ],
-            "temperature": 0.1,
-            "max_tokens": 100,
-            "response_format": {"type": "json_object"},
-        }
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                response = await client.post(
-                    f"{self.settings.cactus_chat_base_url.rstrip('/')}/chat/completions",
-                    json=request,
-                    headers={"Authorization": "Bearer cactus-local"},
-                )
-                response.raise_for_status()
-            body = response.json()
-            content = body["choices"][0]["message"]["content"]
-            selection = EpisodeSelection.model_validate(parse_json_object(content))
+            body = await chat_completion(
+                self.settings,
+                [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": "Query: "
+                        + query
+                        + "\nEpisodes: "
+                        + json.dumps(candidates, separators=(",", ":")),
+                    },
+                ],
+                max_tokens=100,
+                timeout=15,
+            )
+            selection = EpisodeSelection.model_validate(
+                parse_json_object(message_content(body))
+            )
         except (httpx.HTTPError, KeyError, TypeError, ValueError, ValidationError):
             return EpisodeSelection(answerable=False, confidence=0.0)
 

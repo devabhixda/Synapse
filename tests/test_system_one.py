@@ -4,9 +4,9 @@ from typing import Any
 from synapse.config import Settings
 from synapse.db.models import SourceType
 from synapse.domain.models import FastObservation, SourceEvent
-from synapse.inference.cactus import (
-    CactusInterpreter,
+from synapse.inference.chat import (
     FastClassification,
+    LLMInterpreter,
     assemble_observation,
     deterministic_observation,
     parse_json_object,
@@ -38,7 +38,7 @@ def test_deterministic_observation_marks_decision() -> None:
     assert observation.salience == 0.9
 
 
-def test_compact_gemma_classification_assembles_safe_observation() -> None:
+def test_a_compact_classification_assembles_a_safe_observation() -> None:
     event = SourceEvent(
         source_id="test-2",
         source_type=SourceType.SLACK,
@@ -62,12 +62,12 @@ def test_compact_gemma_classification_assembles_safe_observation() -> None:
     observation = assemble_observation(
         event,
         classification,
-        provider="cactus-gemma",
+        provider="google/gemma-4-E2B-it",
         confidence=0.88,
         latency_ms=120,
     )
 
-    assert observation.provider == "cactus-gemma"
+    assert observation.provider == "google/gemma-4-E2B-it"
     assert observation.tags == ["slack", "record_decision"]
     assert observation.entity_mentions == ["Orbit Forge", "Prism"]
 
@@ -82,7 +82,7 @@ async def test_fake_mode_is_the_only_explicit_deterministic_path() -> None:
         occurred_at=datetime.now(UTC),
     )
 
-    observation = await CactusInterpreter(Settings(inference_mode="fake")).observe(event)
+    observation = await LLMInterpreter(Settings(inference_mode="fake")).observe(event)
 
     assert observation.provider == "deterministic-fallback"
 

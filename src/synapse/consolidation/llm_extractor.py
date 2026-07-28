@@ -20,7 +20,7 @@ from synapse.consolidation.models import (
     RelationshipSpec,
 )
 from synapse.db.models import Episode
-from synapse.inference.cactus import parse_json_object
+from synapse.inference.chat import chat_completion, message_content, parse_json_object
 
 ALLOWED_ENTITY_KINDS = {
     "Person",
@@ -47,7 +47,7 @@ class SemanticExtractor(Protocol):
     async def extract(self, episodes: list[Episode]) -> ExtractionResult: ...
 
 
-class GemmaSemanticExtractor:
+class LLMSemanticExtractor:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
 
@@ -59,9 +59,11 @@ class GemmaSemanticExtractor:
         try:
             adjudication = await self._request_adjudication(episodes, candidate)
             if not adjudication.approved:
-                raise ValueError("Gemma rejected the evidence-backed candidate graph")
+                raise ValueError("The model rejected the evidence-backed candidate graph")
             apply_alias_map(candidate, adjudication.alias_map)
-            return ExtractionResult(plan=candidate, provider="cactus-gemma-system2")
+            return ExtractionResult(
+                plan=candidate, provider=f"{self.settings.chat_model}-system2"
+            )
         except (httpx.HTTPError, KeyError, TypeError, ValueError, ValidationError) as error:
             return ExtractionResult(
                 plan=candidate,
@@ -92,9 +94,9 @@ class GemmaSemanticExtractor:
             for episode in episodes
             if any(term in normalize_name(episode.content) for term in alias_terms)
         ]
-        request = {
-            "model": self.settings.cactus_chat_model,
-            "messages": [
+        body = await chat_completion(
+            self.settings,
+            [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {
                     "role": "user",
@@ -104,20 +106,12 @@ class GemmaSemanticExtractor:
                     + json.dumps(candidate_aliases, separators=(",", ":")),
                 },
             ],
-            "temperature": 0.1,
-            "max_tokens": 120,
-            "response_format": {"type": "json_object"},
-        }
-        async with httpx.AsyncClient(timeout=45) as client:
-            response = await client.post(
-                f"{self.settings.cactus_chat_base_url.rstrip('/')}/chat/completions",
-                json=request,
-                headers={"Authorization": "Bearer cactus-local"},
-            )
-            response.raise_for_status()
-        body = response.json()
-        content = body["choices"][0]["message"]["content"]
-        return GraphAdjudication.model_validate(parse_json_object(content))
+            max_tokens=120,
+            timeout=45,
+        )
+        return GraphAdjudication.model_validate(
+            parse_json_object(message_content(body))
+        )
 
 
 def apply_alias_map(plan: ConsolidationPlan, alias_map: dict[str, str]) -> None:

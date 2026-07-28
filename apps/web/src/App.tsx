@@ -40,7 +40,7 @@ import './App.css'
 type Health = {
   status: 'ok' | 'degraded'
   database: string
-  cactus: string
+  inference: string
   models: { chat: string; embedding: string }
 }
 
@@ -287,7 +287,7 @@ function App() {
           <div><p className="eyebrow">Synapse / {mode}</p><h1>{title}</h1></div>
           <div className="health-row" aria-label="Provider status">
             <Status label="PostgreSQL" state={health?.database} icon={Database} />
-            <Status label="Cactus / Gemma" state={health?.cactus} icon={MemoryStick} />
+            <Status label="Inference" state={health?.inference} icon={MemoryStick} />
           </div>
         </header>
 
@@ -356,8 +356,8 @@ function AwakeView({ episodes, health, loading, error, onRefresh }: {
         </div>
       </section>
 
-      {health?.cactus !== 'available' && (
-        <div className="notice"><CircleAlert size={17} /><span>Cactus is offline. Episodes use deterministic System 1 observations and remain pending Mem0 indexing.</span></div>
+      {health?.inference !== 'available' && (
+        <div className="notice"><CircleAlert size={17} /><span>The model server is unreachable. Episodes use deterministic System 1 observations and remain pending Mem0 indexing.</span></div>
       )}
       {error && <div className="error-strip">{error}</div>}
 

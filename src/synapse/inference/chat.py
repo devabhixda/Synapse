@@ -1,3 +1,14 @@
+"""The one place that knows how to reach a chat model.
+
+Four callers need a JSON-returning completion — System 1 classification, the
+compact assertion extractor, the answerability judge, and System 2 alias
+adjudication. They differ in prompt, token budget, and how long they are willing
+to wait, and in nothing else. Keeping the request in one function is what makes
+the model server a configuration detail: there is a single place where the URL,
+the key, and the model name are read, so pointing Synapse at a different
+provider is a settings change rather than an edit in four files.
+"""
+
 import json
 import re
 import time
@@ -30,11 +41,51 @@ class FastClassification(BaseModel):
     salience: float = Field(ge=0, le=1)
 
 
-class CactusInferenceError(RuntimeError):
-    """Raised when System 1 cannot obtain a valid local-model classification."""
+class InferenceError(RuntimeError):
+    """Raised when a call to the chat model cannot be turned into a usable answer."""
 
 
-class CactusInterpreter:
+async def chat_completion(
+    settings: Settings,
+    messages: list[dict[str, str]],
+    *,
+    max_tokens: int,
+    # noqa below: handed to httpx, which times out connect/read/write
+    # separately. Wrapping the call in asyncio.timeout as the rule suggests
+    # would be coarser, not safer.
+    timeout: float,  # noqa: ASYNC109
+    temperature: float = 0.1,
+) -> dict[str, Any]:
+    """One JSON-mode completion against the configured chat endpoint.
+
+    Returns the raw response body; callers pull the message content out
+    themselves because they disagree about what a malformed one means.
+    """
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(
+            f"{settings.chat_base_url.rstrip('/')}/chat/completions",
+            json={
+                "model": settings.chat_model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"},
+            },
+            headers={"Authorization": f"Bearer {settings.chat_api_key}"},
+        )
+        response.raise_for_status()
+    body: dict[str, Any] = response.json()
+    return body
+
+
+def message_content(body: dict[str, Any]) -> str:
+    content: str = body["choices"][0]["message"]["content"]
+    return content
+
+
+class LLMInterpreter:
+    """System 1: label one event with an intent and a salience."""
+
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
 
@@ -44,30 +95,22 @@ class CactusInterpreter:
 
         started = time.perf_counter()
         try:
-            payload = {
-                "model": self.settings.cactus_chat_model,
-                "messages": [
+            body = await chat_completion(
+                self.settings,
+                [
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": event.content},
                 ],
-                "temperature": 0.1,
-                "max_tokens": 48,
-                "response_format": {"type": "json_object"},
-            }
-            async with httpx.AsyncClient(timeout=8) as client:
-                response = await client.post(
-                    f"{self.settings.cactus_chat_base_url.rstrip('/')}/chat/completions",
-                    json=payload,
-                    headers={"Authorization": "Bearer cactus-local"},
-                )
-                response.raise_for_status()
-            body = response.json()
-            content = body["choices"][0]["message"]["content"]
-            classification = FastClassification.model_validate(parse_json_object(content))
+                max_tokens=48,
+                timeout=8,
+            )
+            classification = FastClassification.model_validate(
+                parse_json_object(message_content(body))
+            )
             return assemble_observation(
                 event,
                 classification,
-                provider="cactus-gemma",
+                provider=self.settings.chat_model,
                 confidence=body.get("confidence"),
                 latency_ms=(time.perf_counter() - started) * 1000,
             )
@@ -78,8 +121,8 @@ class CactusInterpreter:
             ValueError,
             json.JSONDecodeError,
         ) as error:
-            raise CactusInferenceError(
-                f"System 1 Gemma classification failed for {event.source_id}: {error}"
+            raise InferenceError(
+                f"System 1 classification failed for {event.source_id}: {error}"
             ) from error
 
 
