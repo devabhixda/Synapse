@@ -1,6 +1,6 @@
 {
   "servers": {
-    "synapse-mem": {
+    "synapse-recall": {
       "type": "stdio",
       "command": "docker",
       "args": ["compose", "run", "--rm", "-T", "--build", "mcp"]

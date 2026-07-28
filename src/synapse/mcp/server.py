@@ -11,7 +11,7 @@ from synapse.recall.models import EpisodeDetail, RecallResult
 from synapse.recall.service import RecallService
 
 mcp = FastMCP(
-    "synapse-mem",
+    "synapse-recall",
     instructions=(
         "Use recall for organizational context. Synapse always searches episodic memory "
         "before semantic memory and records successful semantic fallbacks for future recall."
