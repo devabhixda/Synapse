@@ -3,7 +3,7 @@
 # PyPI refuses `synapse-mem` as too close to the latter. This is the
 # distribution name only; the import stays `synapse`.
 name = "synapse-recall"
-version = "0.1.0"
+version = "0.2.0"
 description = "Episodic and semantic memory over workplace conversations"
 readme = "README.md"
 license = "MIT"
@@ -20,16 +20,23 @@ classifiers = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+  "aiosqlite>=0.21,<1",
   "alembic>=1.16,<2",
-  "asyncpg>=0.30,<1",
   "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
   "json-repair>=0.47,<1",
   "mcp>=1.27,<2",
-  "mem0ai>=2,<3",
-  "pgvector>=0.4,<1",
-  "psycopg[binary,pool]>=3.2,<4",
+  # Pinned exactly: the sqlite_vec provider registers itself through two
+  # private Mem0 registries and an import path its config validator derives
+  # from the provider name. tests/test_sqlite_vec_registry.py fails loudly if
+  # a Mem0 upgrade moves any of them, but only if the version cannot drift on
+  # its own first.
+  "mem0ai==2.0.14",
+  "numpy>=1.26,<3",
   "pydantic-settings>=2.10,<3",
+  # Pinned exactly: sqlite-vec is pre-v1 and its releases warn about breaking
+  # changes to the vec0 table syntax this depends on.
+  "sqlite-vec==0.1.9",
   "sqlalchemy[asyncio]>=2.0.41,<3",
   "uvicorn[standard]>=0.35,<1",
 ]

@@ -3,8 +3,10 @@ from collections.abc import AsyncIterator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from synapse.config import get_settings
+from synapse.db.pragmas import configure_sqlite
 
 engine = create_async_engine(get_settings().database_url, pool_pre_ping=True)
+configure_sqlite(engine)
 session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
 

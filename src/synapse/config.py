@@ -15,6 +15,22 @@ from functools import lru_cache
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine import make_url
+
+
+def sqlite_path(database_url: str) -> str:
+    """The filesystem path inside a SQLAlchemy SQLite URL.
+
+    A URL with no database part is SQLAlchemy's spelling of an anonymous
+    in-memory database, so it maps to the ``sqlite3`` spelling of the same.
+    """
+    url = make_url(database_url)
+    if not url.get_backend_name().startswith("sqlite"):
+        raise ValueError(
+            "Synapse stores memory in SQLite; database_url must be a sqlite URL, "
+            f"got {database_url!r}"
+        )
+    return url.database or ":memory:"
 
 
 class Settings(BaseSettings):
@@ -22,7 +38,7 @@ class Settings(BaseSettings):
 
     app_name: str = "Synapse"
     environment: str = "development"
-    database_url: str = "postgresql+asyncpg://synapse:synapse@localhost:5432/synapse"
+    database_url: str = "sqlite+aiosqlite:///./synapse.db"
     chat_base_url: str = "http://localhost:8080/v1"
     embedding_base_url: str = "http://localhost:8080/v1"
     chat_model: str = "google/gemma-4-E2B-it"
@@ -53,7 +69,14 @@ class Settings(BaseSettings):
 
     @property
     def mem0_database_url(self) -> str:
-        return self.database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+        """The SQLite file the vector store writes to.
+
+        Mem0 opens the file with ``sqlite3`` rather than through SQLAlchemy, so
+        it needs a filesystem path where ``database_url`` carries a driver.
+        Both point at the same file, which is the point: memory is one file to
+        back up and one file to delete.
+        """
+        return sqlite_path(self.database_url)
 
 
 @lru_cache
