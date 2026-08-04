@@ -1,5 +1,9 @@
 name: synapse
 
+# The api, worker, and mcp services all open the same SQLite file on the
+# synapse-data volume, so it is mounted into each of them. Concurrent access is
+# what WAL and busy_timeout in synapse.db.session are for; a Docker named
+# volume is local disk, where SQLite's locking works as documented.
 x-backend: &backend
   build:
     context: .
@@ -8,34 +12,19 @@ x-backend: &backend
     - path: .env
       required: false
   environment:
-    DATABASE_URL: postgresql+asyncpg://synapse:synapse@db:5432/synapse
+    DATABASE_URL: sqlite+aiosqlite:////data/synapse.db
     CHAT_BASE_URL: ${CHAT_BASE_URL:-http://host.docker.internal:8080/v1}
     EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://host.docker.internal:8080/v1}
     CHAT_REASONING_TOKENS: ${CHAT_REASONING_TOKENS:-0}
+  volumes:
+    - synapse-data:/data
   extra_hosts:
     - host.docker.internal:host-gateway
 
 services:
-  db:
-    image: pgvector/pgvector:0.8.5-pg18-trixie
-    environment:
-      POSTGRES_DB: synapse
-      POSTGRES_USER: synapse
-      POSTGRES_PASSWORD: synapse
-    healthcheck:
-      test: [CMD-SHELL, pg_isready -U synapse -d synapse]
-      interval: 2s
-      timeout: 3s
-      retries: 20
-    volumes:
-      - postgres-data:/var/lib/postgresql
-
   migrate:
     <<: *backend
     command: [alembic, upgrade, head]
-    depends_on:
-      db:
-        condition: service_healthy
     restart: no
 
   api:
@@ -83,17 +72,12 @@ services:
     profiles: [tools]
     stdin_open: true
 
+  # Tests build their own SQLite file per test in a temp directory, so this
+  # needs no database of its own and nothing to wait for.
   test:
     <<: *backend
     command: [pytest]
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      DATABASE_URL: postgresql+asyncpg://synapse:synapse@db:5432/synapse_test
-      CHAT_BASE_URL: ${CHAT_BASE_URL:-http://host.docker.internal:8080/v1}
-      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://host.docker.internal:8080/v1}
     profiles: [test]
 
 volumes:
-  postgres-data:
+  synapse-data:

@@ -5,6 +5,9 @@ from mem0 import Memory  # type: ignore[import-untyped]
 
 from synapse.config import Settings, get_settings
 from synapse.domain.models import SourceEvent
+from synapse.memory.sqlite_vec_store import register as register_sqlite_vec
+
+register_sqlite_vec()
 
 
 class Mem0EpisodeStore:
@@ -20,12 +23,11 @@ class Mem0EpisodeStore:
                     "version": "v1.1",
                     "history_db_path": ":memory:",
                     "vector_store": {
-                        "provider": "pgvector",
+                        "provider": "sqlite_vec",
                         "config": {
-                            "connection_string": settings.mem0_database_url,
+                            "path": settings.mem0_database_url,
                             "collection_name": settings.mem0_collection,
                             "embedding_model_dims": settings.embedding_dimensions,
-                            "hnsw": True,
                         },
                     },
                     "embedder": {

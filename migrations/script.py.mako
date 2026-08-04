@@ -8,6 +8,10 @@ from collections.abc import Sequence
 
 from alembic import op
 import sqlalchemy as sa
+
+# The schema uses TypeDecorators (Uuid, UtcDateTime) that autogenerate renders
+# by their fully qualified name, so the module has to be in scope here.
+import synapse.db.models
 ${imports if imports else ""}
 
 revision: str = ${repr(up_revision)}

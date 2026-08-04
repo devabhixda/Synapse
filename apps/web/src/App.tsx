@@ -286,7 +286,7 @@ function App() {
         <header className="topbar">
           <div><p className="eyebrow">Synapse / {mode}</p><h1>{title}</h1></div>
           <div className="health-row" aria-label="Provider status">
-            <Status label="PostgreSQL" state={health?.database} icon={Database} />
+            <Status label="SQLite" state={health?.database} icon={Database} />
             <Status label="Inference" state={health?.inference} icon={MemoryStick} />
           </div>
         </header>

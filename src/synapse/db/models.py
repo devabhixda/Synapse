@@ -17,11 +17,12 @@ is what prevents mismatched parents when nothing does.
 """
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
+    JSON,
     DateTime,
     Enum,
     Float,
@@ -30,13 +31,69 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    TypeDecorator,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy import Uuid as SqlUuid
+from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
 from synapse.db.base import Base
+
+
+class Uuid(TypeDecorator[uuid.UUID]):
+    """A UUID column that also accepts the string form of one.
+
+    Identifiers leave this process as strings — through the API, into Mem0,
+    into a URL — and come back as strings to be looked up again. Postgres's
+    ``UUID(as_uuid=True)`` parsed those on the way in; SQLAlchemy's portable
+    ``Uuid`` raises instead. Coercing here keeps every call site written the
+    way it already was, rather than scattering ``uuid.UUID(...)`` across the
+    query layer to satisfy the storage layer.
+    """
+
+    impl = SqlUuid
+    cache_ok = True
+
+    def process_bind_param(
+        self, value: uuid.UUID | str | None, dialect: Dialect
+    ) -> uuid.UUID | None:
+        if isinstance(value, str):
+            return uuid.UUID(value)
+        return value
+
+
+class UtcDateTime(TypeDecorator[datetime]):
+    """A timestamp that is timezone-aware and in UTC on both sides of storage.
+
+    SQLite has no timestamptz. It stores whatever string it is handed and
+    returns it naive, so a value written as UTC comes back indistinguishable
+    from a local one and comparing it to an aware datetime raises. Postgres's
+    ``timestamptz`` normalized to UTC on write and returned an aware value;
+    this does the same in Python so the rest of the codebase, which assumes
+    aware UTC throughout, does not have to change.
+
+    Naive input is read as already being UTC rather than rejected, because
+    ``func.now()`` defaults and Alembic backfills produce exactly that.
+    """
+
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect: Dialect) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+    def process_result_value(self, value: datetime | None, dialect: Dialect) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
 
 class EpisodeKind(StrEnum):
@@ -81,21 +138,21 @@ class Episode(Tenanted, Base):
         Index("ix_episodes_group_occurred", "group_id", "occurred_at"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     kind: Mapped[EpisodeKind] = mapped_column(episode_kind_enum)
     source_type: Mapped[SourceType] = mapped_column(source_type_enum)
     source_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     conversation_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     content: Mapped[str] = mapped_column(Text)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    participants: Mapped[list[str]] = mapped_column(JSONB, default=list)
-    details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    participants: Mapped[list[str]] = mapped_column(JSON, default=list)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    occurred_at: Mapped[datetime] = mapped_column(UtcDateTime)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UtcDateTime, server_default=func.now()
     )
     mem0_id: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
-    stale_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stale_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
 
     observations: Mapped[list["IntentObservation"]] = relationship(
         back_populates="episode", cascade="all, delete-orphan"
@@ -105,19 +162,19 @@ class Episode(Tenanted, Base):
 class IntentObservation(Tenanted, Base):
     __tablename__ = "intent_observations"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     episode_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("episodes.id", ondelete="CASCADE"), index=True
     )
     intent: Mapped[str] = mapped_column(String(160))
     salience: Mapped[float] = mapped_column(Float)
-    entity_mentions: Mapped[list[str]] = mapped_column(JSONB, default=list)
-    tags: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    entity_mentions: Mapped[list[str]] = mapped_column(JSON, default=list)
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     provider: Mapped[str] = mapped_column(String(80))
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UtcDateTime, server_default=func.now()
     )
 
     episode: Mapped[Episode] = relationship(back_populates="observations")
@@ -127,18 +184,18 @@ class RecallEvent(Tenanted, Base):
     __tablename__ = "recall_events"
     __table_args__ = (Index("ix_recall_events_group_created", "group_id", "created_at"),)
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     query: Mapped[str] = mapped_column(Text)
     normalized_intent: Mapped[str | None] = mapped_column(String(160), nullable=True)
     answer_origin: Mapped[str] = mapped_column(String(40))
-    selected_ids: Mapped[list[str]] = mapped_column(JSONB, default=list)
-    score_details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    selected_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    score_details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_episode_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("episodes.id", ondelete="SET NULL"), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), index=True
+        UtcDateTime, server_default=func.now(), index=True
     )
 
 
@@ -150,21 +207,21 @@ class WorkflowPattern(Tenanted, Base):
         UniqueConstraint("group_id", "key", name="uq_workflow_pattern_key"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     key: Mapped[str] = mapped_column(String(160), index=True)
     name: Mapped[str] = mapped_column(String(255))
     description: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), default="candidate", index=True)
     occurrence_count: Mapped[int] = mapped_column(Integer, default=0)
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
-    evidence_recall_ids: Mapped[list[str]] = mapped_column(JSONB, default=list)
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    evidence_recall_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    first_seen_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    last_seen_at: Mapped[datetime] = mapped_column(UtcDateTime)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UtcDateTime, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        UtcDateTime, server_default=func.now(), onupdate=func.now()
     )
 
     skill_spec: Mapped["SkillSpec | None"] = relationship(
@@ -176,7 +233,7 @@ class SkillSpec(Tenanted, Base):
     __tablename__ = "skill_specs"
     __table_args__ = (UniqueConstraint("group_id", "name", name="uq_skill_spec_name"),)
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     pattern_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("workflow_patterns.id", ondelete="CASCADE"), unique=True, index=True
     )
@@ -184,17 +241,17 @@ class SkillSpec(Tenanted, Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(32), default="candidate", index=True)
     purpose: Mapped[str] = mapped_column(Text)
-    triggers: Mapped[list[str]] = mapped_column(JSONB, default=list)
-    required_queries: Mapped[list[str]] = mapped_column(JSONB, default=list)
-    steps: Mapped[list[str]] = mapped_column(JSONB, default=list)
-    guardrails: Mapped[list[str]] = mapped_column(JSONB, default=list)
-    expected_output: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    triggers: Mapped[list[str]] = mapped_column(JSON, default=list)
+    required_queries: Mapped[list[str]] = mapped_column(JSON, default=list)
+    steps: Mapped[list[str]] = mapped_column(JSON, default=list)
+    guardrails: Mapped[list[str]] = mapped_column(JSON, default=list)
+    expected_output: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UtcDateTime, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        UtcDateTime, server_default=func.now(), onupdate=func.now()
     )
 
     pattern: Mapped[WorkflowPattern] = relationship(back_populates="skill_spec")
@@ -209,14 +266,14 @@ class SkillSpecRevision(Tenanted, Base):
         UniqueConstraint("skill_spec_id", "version", name="uq_skill_spec_revision"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     skill_spec_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("skill_specs.id", ondelete="CASCADE"), index=True
     )
     version: Mapped[int] = mapped_column(Integer)
-    snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    snapshot: Mapped[dict[str, Any]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UtcDateTime, server_default=func.now()
     )
 
     skill_spec: Mapped[SkillSpec] = relationship(back_populates="revisions")
@@ -225,20 +282,20 @@ class SkillSpecRevision(Tenanted, Base):
 class ConsolidationRun(Tenanted, Base):
     __tablename__ = "consolidation_runs"
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     status: Mapped[str] = mapped_column(String(32), default="queued", index=True)
     stage: Mapped[str] = mapped_column(String(64), default="queued")
     provider: Mapped[str] = mapped_column(String(80), default="deterministic")
     episode_count: Mapped[int] = mapped_column(Integer, default=0)
     entity_count: Mapped[int] = mapped_column(Integer, default=0)
     relationship_count: Mapped[int] = mapped_column(Integer, default=0)
-    graph_diff: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    graph_diff: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), index=True
+        UtcDateTime, server_default=func.now(), index=True
     )
-    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
 
     snapshots: Mapped[list["ConsolidationEpisode"]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
@@ -251,7 +308,7 @@ class ConsolidationEpisode(Tenanted, Base):
         UniqueConstraint("run_id", "episode_id", name="uq_consolidation_episode"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     run_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("consolidation_runs.id", ondelete="CASCADE"), index=True
     )
@@ -272,18 +329,18 @@ class SemanticEntity(Tenanted, Base):
         Index("ix_semantic_entities_group_name", "group_id", "normalized_name"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     kind: Mapped[str] = mapped_column(String(64))
     canonical_name: Mapped[str] = mapped_column(String(255))
     normalized_name: Mapped[str] = mapped_column(String(255))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    attributes: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UtcDateTime, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        UtcDateTime, server_default=func.now(), onupdate=func.now()
     )
 
     aliases: Mapped[list["EntityAlias"]] = relationship(
@@ -300,7 +357,7 @@ class EntityAlias(Tenanted, Base):
         UniqueConstraint("group_id", "normalized_alias", name="uq_entity_alias_normalized"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     entity_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("semantic_entities.id", ondelete="CASCADE"), index=True
     )
@@ -319,20 +376,20 @@ class ExternalAttribute(Tenanted, Base):
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     entity_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("semantic_entities.id", ondelete="CASCADE"), index=True
     )
     provider: Mapped[str] = mapped_column(String(80), index=True)
     field_group: Mapped[str] = mapped_column(String(120))
-    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
     observed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UtcDateTime, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        UtcDateTime, server_default=func.now(), onupdate=func.now()
     )
 
     entity: Mapped[SemanticEntity] = relationship(back_populates="external_attributes")
@@ -364,7 +421,7 @@ class SemanticRelationship(Tenanted, Base):
         Index("ix_semantic_relationships_group_current", "group_id", "invalid_at"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     subject_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("semantic_entities.id", ondelete="CASCADE"), index=True
     )
@@ -372,17 +429,17 @@ class SemanticRelationship(Tenanted, Base):
     object_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("semantic_entities.id", ondelete="CASCADE"), index=True
     )
-    attributes: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
+    attributes: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
-    valid_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    valid_at: Mapped[datetime] = mapped_column(UtcDateTime)
     invalid_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
+        UtcDateTime, nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        UtcDateTime, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+        UtcDateTime, server_default=func.now(), onupdate=func.now()
     )
 
     subject: Mapped[SemanticEntity] = relationship(foreign_keys=[subject_id])
@@ -398,7 +455,7 @@ class RelationshipEvidence(Tenanted, Base):
         UniqueConstraint("relationship_id", "episode_id", name="uq_relationship_evidence"),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     relationship_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("semantic_relationships.id", ondelete="CASCADE"), index=True
     )

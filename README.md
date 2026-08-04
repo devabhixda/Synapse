@@ -11,8 +11,8 @@ pip install synapse-recall
 
 The distribution is `synapse-recall` because `synapse` and `synapse-memory` were already
 taken on PyPI by unrelated projects; the import is `synapse`. Embedding it in another
-application needs nothing but a Postgres with pgvector and two OpenAI-compatible
-endpoints — see [Using a Different Model Server](#using-a-different-model-server).
+application needs nothing but two OpenAI-compatible endpoints — memory is a SQLite
+file, with no database server to run — see [Using a Different Model Server](#using-a-different-model-server).
 
 To run the whole thing instead, including the API and the workbench, clone the repo and
 use Compose as described under [Run Locally](#run-locally).
@@ -75,7 +75,8 @@ before ingestion.
 	assertions, answerability checks, alias adjudication, and 1,536-dimensional embeddings.
 - **Crustdata:** enriches resolved company nodes during System 2 only; coverage misses remain
 	unknown instead of being filled with fixture data.
-- **Mem0:** provides the episodic vector-memory layer over PostgreSQL/pgvector.
+- **Mem0:** provides the episodic vector-memory layer, over SQLite and sqlite-vec through
+	a provider Synapse implements.
 
 The product also demonstrates how approved Synapse procedures can guide coding agents through
 MCP without giving the memory server code-execution authority.
@@ -88,8 +89,8 @@ flowchart LR
 	C[Public mock fallback] --> B
 	B --> D[System 1 event processing]
 	D --> E[Gemma 4 on Cactus]
-	E --> F[PostgreSQL episodes and observations]
-	F --> G[Mem0 and pgvector index]
+	E --> F[SQLite episodes and observations]
+	F --> G[Mem0 and sqlite-vec index]
 	F --> H[Awake workbench]
 	F --> I[System 2 sleep cycle]
 	I --> J[Evidence-backed assertions]
@@ -157,7 +158,7 @@ stays queryable, and each consolidation run reports how many edges it retired.
 | --- | --- |
 | Inference | Any OpenAI-compatible endpoint; Cactus, Gemma 4 E2B, Apple Metal by default |
 | Episodic memory | Mem0 OSS |
-| Durable storage | PostgreSQL 18, pgvector, SQLAlchemy, Alembic |
+| Durable storage | SQLite, sqlite-vec, FTS5, SQLAlchemy, Alembic |
 | API and agents | FastAPI, MCP Python SDK v1 |
 | Workbench | React 19, TypeScript, React Flow, Dagre, Vite |
 | Runtime | Docker Compose; native Cactus is the Metal-accelerated exception |
@@ -220,7 +221,7 @@ knowledge of sponsor names. Crustdata is called only from System 2 after a `Comp
 and domain have been resolved. It is an enrichment provider, not a source-memory company.
 
 Replaying the fixture multiple times does not duplicate episodes. With Cactus running, all
-18 episodes are indexed in Mem0/pgvector. A sleep cycle currently produces 21 canonical
+18 episodes are indexed in Mem0/sqlite-vec. A sleep cycle currently produces 21 canonical
 entities and 20 relationships. Repeating the sleep cycle updates the existing graph without
 duplicating it. With `CRUSTDATA_API_KEY` configured, Crustdata attempts live enrichment for
 the four sponsor company nodes; provider coverage is preserved as an observed result rather
@@ -420,7 +421,7 @@ before running `alembic upgrade head` to pick the name; changing it afterwards i
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/health` | PostgreSQL and model-server availability plus active models |
+| `GET` | `/api/health` | Database and model-server availability plus active models |
 | `GET` | `/api/config` | Public model, embedding dimension, and retrieval threshold |
 | `GET` | `/api/episodes?group_id=` | Latest persisted episodes and Mem0 indexing state |
 | `POST` | `/api/demo/replay?group_id=` | Idempotently process and reconcile the mock event stream |
@@ -440,7 +441,6 @@ The MCP tools take `group_id` the same way: `recall`, `get_episode`,
 
 | Service | Current responsibility |
 | --- | --- |
-| `db` | PostgreSQL 18 and pgvector |
 | `migrate` | One-shot Alembic schema upgrade |
 | `api` | FastAPI, System 1, the chat client, and Mem0 |
 | `worker` | Background worker process and database heartbeat |
@@ -459,8 +459,8 @@ make replay         # Process the public mock fallback
 make logs           # Follow API, worker, and web logs
 make lint           # Run Python and frontend static checks
 make test           # Run backend tests and frontend validation
-make down           # Stop containers while preserving PostgreSQL data
-make reset          # Stop containers and delete the PostgreSQL volume
+make down           # Stop containers while preserving the SQLite volume
+make reset          # Stop containers and delete the SQLite volume
 ```
 
 ## Verified
@@ -474,7 +474,7 @@ The current implementation passes:
 - ESLint
 - TypeScript compilation
 - Vite production build
-- Alembic migration against PostgreSQL 18
+- Alembic migration against SQLite
 - Docker Compose health checks
 - A live 40-conversation import with zero observation or assertion failures
 - A live 43-entity, 40-relationship graph with evidence on every edge

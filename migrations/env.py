@@ -17,7 +17,15 @@ target_metadata = Base.metadata
 
 
 def do_run_migrations(connection: object) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+    # SQLite cannot ALTER most of a column definition, so any future revision
+    # that changes one has to rebuild the table. render_as_batch makes Alembic
+    # emit that copy-and-swap instead of an ALTER that SQLite would reject.
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_type=True,
+        render_as_batch=True,
+    )
     with context.begin_transaction():
         context.run_migrations()
 

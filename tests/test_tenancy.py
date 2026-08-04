@@ -1,4 +1,4 @@
-"""Isolation between accounts, checked against Postgres.
+"""Isolation between accounts, checked against a real database.
 
 These run the real services against a real database, because the property under
 test is the absence of something — a missing ``where`` clause — and a mock will

@@ -12,3 +12,9 @@ apps/web/dist/
 test-results/
 playwright-report/
 slack-exports/
+
+# The default database_url writes memory to ./synapse.db, so running anything
+# from the repo root leaves one here. The -wal and -shm files are WAL's.
+*.db
+*.db-wal
+*.db-shm
