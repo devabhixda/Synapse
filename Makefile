@@ -25,8 +25,11 @@ slack-import:
 	@test -n "$${SYNAPSE_GROUP_ID}" || (echo "Set SYNAPSE_GROUP_ID to the account this export belongs to" && exit 1)
 	docker compose run --rm -T -v "$${SLACK_EXPORT_DIR}:/data/slack-export:ro" api python -m synapse.sources.slack_import --export-root /data/slack-export --group-id "$${SYNAPSE_GROUP_ID}" --channel all-docwise --channel scribe-iteration --max-events 40 --max-per-channel 30 --min-score 4
 
+# Tests build a SQLite file per test in a temp directory, so this no longer
+# has to stand up a database first. Run `docker compose run --rm --build test`
+# to run the same suite inside the pinned image.
 test:
-	docker compose run --rm --build test
+	pytest
 	npm --prefix apps/web run lint
 	npm --prefix apps/web run build
 
