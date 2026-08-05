@@ -237,3 +237,52 @@ class SystemOneService:
             # and the next run picks up exactly what is still missing.
             await session.commit()
         return counts
+
+    async def reindex_group(
+        self, group_id: str, session: AsyncSession, *, limit: int | None = None
+    ) -> dict[str, int]:
+        """Rebuild the whole vector index for ``group_id`` from stored episodes.
+
+        Unlike :meth:`reindex_missing`, which repairs the rows that never made
+        it into the index, this discards the index and builds it again from
+        every episode the group has. It exists because how an episode is indexed
+        can change — the chunk size, the embedding model, the decision to embed
+        bodies rather than summaries — and none of those changes reach episodes
+        already stored. ``process`` recognises an episode it has seen and returns
+        early without rewriting it, so an ingest re-run would not do this.
+
+        Nothing is re-read from the source and no model is asked anything: the
+        bodies are already on the rows. The cost is one embedding per chunk.
+
+        The old vectors are dropped first, since they cannot be matched up with
+        the ones replacing them and would otherwise linger and keep matching.
+        Episodes are untouched, so a failure here costs a re-run, not data.
+        """
+        await self.memory_store.forget_group(group_id)
+
+        query = (
+            select(Episode)
+            .where(Episode.group_id == group_id, Episode.kind == EpisodeKind.SOURCE)
+            .order_by(Episode.occurred_at)
+        )
+        if limit is not None:
+            query = query.limit(limit)
+        episodes = list((await session.scalars(query)).all())
+
+        counts = {"indexed": 0, "failed": 0}
+        for episode in episodes:
+            try:
+                await self._index(
+                    episode, _event_from(episode), group_id, episode.summary or ""
+                )
+                counts["indexed"] += 1
+            except Exception as error:  # noqa: BLE001 — one bad row must not stop the rebuild
+                episode.mem0_id = None
+                episode.details = {
+                    **(episode.details or {}),
+                    "memory_index_error": type(error).__name__,
+                }
+                counts["failed"] += 1
+                logger.warning("reindexing episode %s failed: %s", episode.id, error)
+            await session.commit()
+        return counts
