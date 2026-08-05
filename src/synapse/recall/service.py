@@ -114,12 +114,25 @@ class RecallService:
                 await self._record_event(result, group_id, normalized, session)
                 return result
 
+        # The judge declined, so no single conversation is being put forward as
+        # the answer. The conversations that matched are still the best evidence
+        # there is, and they are carried through as citations rather than
+        # dropped: a caller that renders sources, or composes its own answer
+        # from them, should not be left with only the graph's abstraction
+        # because one yes/no went the other way.
+        retrieved = [
+            citation
+            for episode, memory in candidates
+            for citation in episode_citations(episode, matched_text(episode, memory))
+        ]
+
         semantic = await search_semantic_context(query, group_id, session)
         if semantic.answer is None:
             result = RecallResult(
                 query=query,
                 answer=None,
                 answer_origin="miss",
+                citations=retrieved,
                 score_details={"episodic_candidates": len(candidates)},
                 latency_ms=(time.perf_counter() - started) * 1000,
             )
@@ -138,7 +151,9 @@ class RecallService:
             query=query,
             answer=semantic.answer,
             answer_origin="semantic_fallback",
-            citations=semantic.citations,
+            # Graph citations first — they are what the answer was drawn from —
+            # followed by the conversations that matched but were not selected.
+            citations=[*semantic.citations, *retrieved],
             selected_ids=semantic.selected_ids,
             score_details={
                 "episodic_candidates": len(candidates),
