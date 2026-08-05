@@ -45,17 +45,7 @@ class SystemOneService:
         if existing is not None:
             if existing.mem0_id is None and existing.summary:
                 try:
-                    existing.mem0_id = await self.memory_store.add_episode(
-                        episode_id=str(existing.id),
-                        group_id=group_id,
-                        summary=existing.summary,
-                        event=event,
-                    )
-                    existing.details = {
-                        key: value
-                        for key, value in existing.details.items()
-                        if key != "memory_index_error"
-                    }
+                    await self._index(existing, event, group_id, existing.summary)
                     await session.commit()
                     await session.refresh(existing)
                 except Exception as error:
@@ -95,18 +85,42 @@ class SystemOneService:
         await session.flush()
 
         try:
-            episode.mem0_id = await self.memory_store.add_episode(
-                episode_id=str(episode.id),
-                group_id=group_id,
-                summary=observation.summary,
-                event=event,
-            )
+            await self._index(episode, event, group_id, observation.summary)
         except Exception as error:
             episode.details = {**episode.details, "memory_index_error": type(error).__name__}
 
         await session.commit()
         await session.refresh(episode)
         return episode, True
+
+    async def _index(
+        self, episode: Episode, event: SourceEvent, group_id: str, summary: str
+    ) -> None:
+        """Write the episode's vectors and remember which ones they are.
+
+        An episode becomes several vectors, one per chunk of its body. Their ids
+        are kept on the row so the set can be replaced wholesale when the body
+        changes — nothing else can identify them afterwards, and vectors left
+        behind go on matching text the episode no longer contains. ``mem0_id``
+        keeps holding the first of them, which is what marks the row indexed.
+        """
+        written = await self.memory_store.add_episode(
+            episode_id=str(episode.id),
+            group_id=group_id,
+            summary=summary,
+            event=event,
+        )
+        # A store written against the pre-chunking protocol returns the one id
+        # it made rather than a list. Indexing that as a sequence would take its
+        # first character for the id, so the shape is normalised here instead.
+        ids = [written] if isinstance(written, str) else list(written or [])
+        episode.mem0_id = ids[0] if ids else None
+        episode.details = {
+            key: value
+            for key, value in (episode.details or {}).items()
+            if key != "memory_index_error"
+        }
+        episode.details = {**episode.details, "mem0_ids": list(ids)}
 
     async def reindex_missing(
         self, group_id: str, session: AsyncSession, *, limit: int | None = None
@@ -140,17 +154,9 @@ class SystemOneService:
         counts = {"indexed": 0, "failed": 0}
         for episode in episodes:
             try:
-                episode.mem0_id = await self.memory_store.add_episode(
-                    episode_id=str(episode.id),
-                    group_id=group_id,
-                    summary=episode.summary or "",
-                    event=_event_from(episode),
+                await self._index(
+                    episode, _event_from(episode), group_id, episode.summary or ""
                 )
-                episode.details = {
-                    key: value
-                    for key, value in (episode.details or {}).items()
-                    if key != "memory_index_error"
-                }
                 counts["indexed"] += 1
             except Exception as error:  # noqa: BLE001 — one bad row must not stop the repair
                 episode.details = {
