@@ -67,6 +67,15 @@ class Settings(BaseSettings):
     procedural_min_occurrences: int = Field(default=2, ge=2)
     memory_hit_threshold: float = Field(default=0.62, ge=0, le=1)
     mem0_collection: str = "synapse_episodes_gemma_1536"
+    # An episode is indexed as several vectors, one per chunk of its body, so a
+    # long conversation is searchable throughout rather than by its opening
+    # alone. This is the size of those chunks; see ``synapse.memory.chunking``.
+    memory_chunk_chars: int = Field(default=700, ge=100)
+    # Vector hits fetched per search, before they are folded back to one
+    # candidate per episode. Several chunks of one long episode can occupy these
+    # slots, so this is deliberately larger than the number of distinct episodes
+    # a query is expected to need.
+    memory_search_top_k: int = Field(default=20, ge=1)
 
     @property
     def mem0_database_url(self) -> str:

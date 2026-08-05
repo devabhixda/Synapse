@@ -67,13 +67,20 @@ class StubMemoryStore:
     def __init__(self, hits: list[dict[str, Any]] | None = None) -> None:
         self.hits = hits or []
         self.added: list[tuple[str, str]] = []
+        self.forgotten: list[str] = []
         self.searched: list[tuple[str, str]] = []
 
     async def add_episode(
         self, *, episode_id: str, group_id: str, summary: str, event: SourceEvent
-    ) -> str:
+    ) -> list[str]:
         self.added.append((group_id, episode_id))
-        return f"mem0-{episode_id}"
+        return [f"mem0-{episode_id}"]
+
+    async def forget_memories(self, memory_ids: list[str]) -> None:
+        self.forgotten.extend(memory_ids)
+
+    async def forget_group(self, group_id: str) -> None:
+        self.forgotten.append(group_id)
 
     async def add_retrieval_episode(
         self, *, episode_id: str, group_id: str, answer: str, query: str, occurred_at: str

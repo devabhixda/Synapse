@@ -72,3 +72,122 @@ async def test_mcp_lists_recall_and_episode_tools() -> None:
         "list_skill_specs",
         "get_skill_spec",
     }
+
+def _episode(content: str, summary: str) -> Episode:
+    return Episode(
+        id=uuid.uuid4(),
+        group_id="acme",
+        kind=EpisodeKind.SOURCE,
+        source_type=SourceType.SLACK,
+        source_id="slack-1",
+        conversation_id="ext-acme",
+        content=content,
+        summary=summary,
+        participants=["rishi"],
+        details={},
+        occurred_at=datetime.now(UTC),
+    )
+
+
+def test_matched_text_is_the_chunk_that_hit_not_the_summary() -> None:
+    """A long thread is judged on the passage that matched, not its opening.
+
+    The summary is the body's first characters, so for a ten-day thread it is
+    whoever spoke first. Judging that is how a thread gets rejected for failing
+    to answer a question its tenth message answers outright.
+    """
+    from synapse.recall.service import matched_text
+
+    episode = _episode(
+        content="caleb: getting a replica up tonight\nrishi: GB300 c=4 0.51 / 0.72",
+        summary="caleb: getting a replica up tonight",
+    )
+    hit = {"memory": "rishi: GB300 c=4 0.51 / 0.72", "score": 0.8}
+
+    assert matched_text(episode, hit) == "rishi: GB300 c=4 0.51 / 0.72"
+
+
+def test_matched_text_falls_back_for_episodes_indexed_before_chunking() -> None:
+    from synapse.recall.service import matched_text
+
+    episode = _episode(content="body", summary="a summary")
+    assert matched_text(episode, {}) == "a summary"
+    assert matched_text(episode, {"memory": "   "}) == "a summary"
+
+
+def test_citations_quote_the_matched_span_when_one_is_known() -> None:
+    episode = _episode(content="the whole ten-day thread", summary="its opening")
+
+    assert episode_citations(episode)[0].excerpt == "the whole ten-day thread"
+    assert episode_citations(episode, "the passage")[0].excerpt == "the passage"
+
+
+async def test_a_decline_is_confirmed_before_it_is_believed() -> None:
+    """The two verdicts do not cost the same.
+
+    Saying yes puts a cited conversation in front of someone who can read it.
+    Saying no discards the episodic path and answers from the graph instead, so
+    a spurious no is the expensive one and is worth asking about twice.
+    """
+    from synapse.recall.answerability import EpisodeAnswerabilityJudge
+    from synapse.recall.models import EpisodeSelection
+
+    verdicts = [
+        EpisodeSelection(answerable=False, confidence=0.4),
+        EpisodeSelection(answerable=True, selected_episode_id="e1", confidence=0.9),
+    ]
+    calls = []
+
+    async def _attempt(self, query, candidates):
+        calls.append(query)
+        return verdicts[len(calls) - 1]
+
+    judge = EpisodeAnswerabilityJudge.__new__(EpisodeAnswerabilityJudge)
+    EpisodeAnswerabilityJudge._attempt = _attempt  # type: ignore[method-assign]
+    try:
+        selection = await judge.select("q", [{"episode_id": "e1", "text": "t"}])
+    finally:
+        del EpisodeAnswerabilityJudge._attempt
+
+    assert len(calls) == 2
+    assert selection.answerable and selection.selected_episode_id == "e1"
+
+
+async def test_an_answered_query_is_judged_once() -> None:
+    """The confirmation is only for declines; a yes must not cost a second call."""
+    from synapse.recall.answerability import EpisodeAnswerabilityJudge
+    from synapse.recall.models import EpisodeSelection
+
+    calls = []
+
+    async def _attempt(self, query, candidates):
+        calls.append(query)
+        return EpisodeSelection(answerable=True, selected_episode_id="e1", confidence=0.9)
+
+    judge = EpisodeAnswerabilityJudge.__new__(EpisodeAnswerabilityJudge)
+    EpisodeAnswerabilityJudge._attempt = _attempt  # type: ignore[method-assign]
+    try:
+        await judge.select("q", [{"episode_id": "e1", "text": "t"}])
+    finally:
+        del EpisodeAnswerabilityJudge._attempt
+
+    assert len(calls) == 1
+
+
+async def test_no_candidates_is_decided_without_asking_anyone() -> None:
+    from synapse.recall.answerability import EpisodeAnswerabilityJudge
+
+    calls = []
+
+    async def _attempt(self, query, candidates):
+        calls.append(query)
+        raise AssertionError("should not be reached")
+
+    judge = EpisodeAnswerabilityJudge.__new__(EpisodeAnswerabilityJudge)
+    EpisodeAnswerabilityJudge._attempt = _attempt  # type: ignore[method-assign]
+    try:
+        selection = await judge.select("q", [])
+    finally:
+        del EpisodeAnswerabilityJudge._attempt
+
+    assert not selection.answerable and calls == []
