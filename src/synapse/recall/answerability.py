@@ -51,8 +51,30 @@ class EpisodeAnswerabilityJudge:
     async def select(
         self, query: str, candidates: list[dict[str, object]]
     ) -> EpisodeSelection:
+        """Decide which candidate, if any, answers the query.
+
+        A decline is confirmed by asking a second time. The two verdicts do not
+        cost the same: saying yes puts a cited conversation in front of someone
+        who can read it and disagree, while saying no discards the episodic path
+        and answers from the graph's abstraction instead. Temperature is already
+        zero, but the same prompt against the same evidence still lands
+        differently now and then, and asking twice makes a spurious no rarer
+        without making a considered one any harder to reach.
+
+        The second call happens only on a decline, so a query that is answered
+        pays nothing for it.
+        """
         if not candidates:
             return EpisodeSelection(answerable=False, confidence=1.0)
+
+        selection = await self._attempt(query, candidates)
+        if selection.answerable:
+            return selection
+        return await self._attempt(query, candidates)
+
+    async def _attempt(
+        self, query: str, candidates: list[dict[str, object]]
+    ) -> EpisodeSelection:
         try:
             body = await chat_completion(
                 self.settings,
@@ -68,6 +90,12 @@ class EpisodeAnswerabilityJudge:
                 ],
                 max_tokens=100,
                 timeout=15,
+                # A yes/no on fixed evidence is a decision, not a composition:
+                # there is nothing here that variety improves. At 0.1 the same
+                # query against the same episodes lands on different verdicts
+                # between runs, and a spurious "no" is expensive — it discards
+                # the episodic path for that query entirely.
+                temperature=0.0,
             )
             selection = EpisodeSelection.model_validate(
                 parse_json_object(message_content(body))
