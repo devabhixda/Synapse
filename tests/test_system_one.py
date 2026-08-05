@@ -2,6 +2,7 @@ import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -206,3 +207,70 @@ async def test_reindex_missing_repairs_episodes_a_watermark_would_never_resend(
         assert orphan.mem0_id is None
 
     await engine.dispose()
+
+
+async def test_a_malformed_answer_is_retried_then_labelled_deterministically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model that mumbles must not cost the conversation.
+
+    The intent and salience are metadata about the episode; the content is the
+    episode. Raising here aborts the write, and the caller's watermark then
+    moves past messages that were never stored.
+    """
+    from synapse.inference.chat import LLMInterpreter, MalformedResponse
+
+    calls = []
+
+    async def _classify(self, event):
+        calls.append(event.source_id)
+        raise MalformedResponse("not an object")
+
+    monkeypatch.setattr(LLMInterpreter, "_classify", _classify)
+    interpreter = LLMInterpreter(Settings(inference_mode="auto"))
+
+    observation = await interpreter.observe(
+        SourceEvent(
+            source_id="evt-1",
+            source_type=SourceType.SLACK,
+            conversation_id="c",
+            content="we decided to merge the adapter into the base weights",
+            participants=["abhi"],
+            occurred_at=datetime.now(UTC),
+        )
+    )
+
+    assert len(calls) == 2, "a malformed answer should be asked again once"
+    assert observation.provider == "deterministic-fallback"
+    assert observation.intent == "record_decision"
+    assert observation.summary
+
+
+async def test_an_endpoint_that_cannot_answer_still_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """That is a configuration fault, and it is the same on every event.
+
+    Absorbing it would relabel the whole corpus deterministically without
+    anyone noticing. The caller holds its watermark back on failure, so
+    stopping loses nothing.
+    """
+    from synapse.inference.chat import InferenceError, LLMInterpreter
+
+    async def _classify(self, event):
+        raise InferenceError("the model spent its whole completion budget")
+
+    monkeypatch.setattr(LLMInterpreter, "_classify", _classify)
+    interpreter = LLMInterpreter(Settings(inference_mode="auto"))
+
+    with pytest.raises(InferenceError, match="completion budget"):
+        await interpreter.observe(
+            SourceEvent(
+                source_id="evt-2",
+                source_type=SourceType.SLACK,
+                conversation_id="c",
+                content="anything",
+                participants=["abhi"],
+                occurred_at=datetime.now(UTC),
+            )
+        )

@@ -10,6 +10,7 @@ provider is a settings change rather than an edit in four files.
 """
 
 import json
+import logging
 import re
 import time
 from typing import Any, Literal
@@ -19,6 +20,8 @@ from pydantic import BaseModel, Field
 
 from synapse.config import Settings, get_settings
 from synapse.domain.models import FastObservation, SourceEvent, semantic_assertions
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """Classify one work event. Return exactly one JSON object with `intent`
 and `salience`. Intent must be one of: record_decision, report_blocker, request_status,
@@ -43,6 +46,17 @@ class FastClassification(BaseModel):
 
 class InferenceError(RuntimeError):
     """Raised when a call to the chat model cannot be turned into a usable answer."""
+
+
+class MalformedResponse(InferenceError):
+    """The endpoint answered, but not with the object that was asked for.
+
+    Separate from its parent because the two want opposite handling. A model
+    that returns a broken object on one event and a good one on the next is
+    noise to absorb; an endpoint that cannot answer at all — no content, or a
+    budget spent entirely on thinking — is a configuration fault, and absorbing
+    that would degrade every episode in the corpus quietly.
+    """
 
 
 async def chat_completion(
@@ -111,9 +125,47 @@ class LLMInterpreter:
         self.settings = settings or get_settings()
 
     async def observe(self, event: SourceEvent) -> FastObservation:
+        """Label the event, falling back to the rule-based labeller if asked twice.
+
+        What this produces is an intent, a salience and a summary — metadata
+        about the conversation, not the conversation. The content is stored
+        either way, and the deterministic labeller can supply all three without
+        a model.
+
+        So a model that mumbles must not cost the episode. Raising here aborts
+        the write, and the caller's watermark then moves past messages that were
+        never stored: for a thread the next refresh re-reads it, but nothing
+        goes back for a day's batch, so the failure is permanent. A worse label
+        is a far smaller loss than the conversation.
+
+        Only a malformed answer is absorbed. An endpoint that cannot answer at
+        all is a configuration fault and still raises, because degrading every
+        episode quietly is worse than stopping — and the caller now holds its
+        watermark back on failure, so stopping costs nothing.
+
+        The call is retried once first — the failures seen in practice are
+        a malformed object from an otherwise healthy endpoint, and a second ask
+        usually returns a good one.
+        """
         if self.settings.inference_mode == "fake":
             return deterministic_observation(event)
 
+        for attempt in (1, 2):
+            try:
+                return await self._classify(event)
+            except MalformedResponse as error:
+                if attempt == 1:
+                    continue
+                logger.warning(
+                    "System 1 classification failed for %s (%s); labelling it "
+                    "deterministically so the episode is still stored",
+                    event.source_id,
+                    error,
+                )
+                return deterministic_observation(event)
+        raise AssertionError("unreachable")
+
+    async def _classify(self, event: SourceEvent) -> FastObservation:
         started = time.perf_counter()
         try:
             body = await chat_completion(
@@ -135,6 +187,10 @@ class LLMInterpreter:
                 confidence=body.get("confidence"),
                 latency_ms=(time.perf_counter() - started) * 1000,
             )
+        except InferenceError:
+            # message_content's own diagnosis — no content, or a budget spent
+            # thinking. Systematic, and it names the setting that fixes it.
+            raise
         except (
             httpx.HTTPError,
             KeyError,
@@ -142,7 +198,7 @@ class LLMInterpreter:
             ValueError,
             json.JSONDecodeError,
         ) as error:
-            raise InferenceError(
+            raise MalformedResponse(
                 f"System 1 classification failed for {event.source_id}: {error}"
             ) from error
 
