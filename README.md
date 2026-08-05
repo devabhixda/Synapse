@@ -11,8 +11,9 @@ pip install synapse-recall
 
 The distribution is `synapse-recall` because `synapse` and `synapse-memory` were already
 taken on PyPI by unrelated projects; the import is `synapse`. Embedding it in another
-application needs nothing but two OpenAI-compatible endpoints — memory is a SQLite
-file, with no database server to run — see [Using a Different Model Server](#using-a-different-model-server).
+application needs nothing but two OpenAI-compatible endpoints — memory is a pair of
+SQLite files (`memory.db` and its `memory.vectors.db` index), with no database server
+to run — see [Using a Different Model Server](#using-a-different-model-server).
 
 To run the whole thing instead, including the API and the workbench, clone the repo and
 use Compose as described under [Run Locally](#run-locally).

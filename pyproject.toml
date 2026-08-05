@@ -3,7 +3,7 @@
 # PyPI refuses `synapse-mem` as too close to the latter. This is the
 # distribution name only; the import stays `synapse`.
 name = "synapse-recall"
-version = "0.2.0"
+version = "0.2.1"
 description = "Episodic and semantic memory over workplace conversations"
 readme = "README.md"
 license = "MIT"

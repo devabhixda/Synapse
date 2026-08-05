@@ -196,3 +196,62 @@ def _index_counts(store: SqliteVecStore) -> tuple[int, int]:
     items = store._conn.execute('SELECT COUNT(*) FROM "c"').fetchone()[0]
     fts = store._conn.execute('SELECT COUNT(*) FROM "c_fts"').fetchone()[0]
     return items, fts
+
+
+def test_keyword_search_matches_across_word_forms(store: SqliteVecStore) -> None:
+    """Without stemming, a search for "deployment" misses a memory that says
+    "deployments", which is most of what a question phrased in prose asks for."""
+    store.insert(
+        vectors=[[0, 0, 1, 0]],
+        payloads=[payload("the deployments were running all week", "acme")],
+        ids=["e"],
+    )
+
+    for query in ("deployment", "run", "deploy"):
+        assert store.keyword_search(query, top_k=5, filters={"user_id": "acme"}), (
+            f"{query!r} matched nothing"
+        )
+
+
+def test_an_index_written_without_stemming_is_rebuilt_on_open(tmp_path: Path) -> None:
+    """The tokenizer is fixed at creation and ``IF NOT EXISTS`` will not change
+    it, so reopening an older file has to notice and replay the items table."""
+    path = str(tmp_path / "memory.db")
+    store = SqliteVecStore(path=path, collection_name="c", embedding_model_dims=4)
+    store.insert(
+        vectors=[[1, 0, 0, 0]],
+        payloads=[payload("the deployments were running", "acme")],
+        ids=["a"],
+    )
+
+    # Put the keyword index back the way a pre-stemming version left it.
+    with store._conn:
+        store._conn.execute('DROP TABLE "c_fts"')
+        store._conn.execute('CREATE VIRTUAL TABLE "c_fts" USING fts5(content)')
+        store._conn.execute(
+            'INSERT INTO "c_fts"(rowid, content) VALUES (1, ?)',
+            ("the deployments were running",),
+        )
+    assert store.keyword_search("deployment", top_k=5) == []
+
+    reopened = SqliteVecStore(path=path, collection_name="c", embedding_model_dims=4)
+
+    assert reopened.keyword_search("deployment", top_k=5)
+    # Replayed from the items table, so the rebuilt index has content in it
+    # rather than being merely present and empty.
+    assert reopened.keyword_search("running", top_k=5)
+
+
+def test_a_stemmed_index_is_left_alone_on_reopen(tmp_path: Path) -> None:
+    path = str(tmp_path / "memory.db")
+    SqliteVecStore(path=path, collection_name="c", embedding_model_dims=4).insert(
+        vectors=[[1, 0, 0, 0]], payloads=[payload("deploying", "acme")], ids=["a"]
+    )
+
+    reopened = SqliteVecStore(path=path, collection_name="c", embedding_model_dims=4)
+    sql = reopened._conn.execute(
+        "SELECT sql FROM sqlite_master WHERE name = 'c_fts'"
+    ).fetchone()[0]
+
+    assert "porter" in sql
+    assert reopened.keyword_search("deploy", top_k=5)

@@ -12,13 +12,16 @@ from sqlalchemy import event
 
 
 def configure_sqlite(engine: Any) -> None:
-    """Set the pragmas that make one SQLite file safe for two writers.
+    """Set the pragmas that make one SQLite file safe for concurrent writers.
 
-    Mem0 opens the same file on its own ``sqlite3`` connection, so the engine
-    is not the only writer. WAL lets its reads proceed while a write is in
-    flight, and ``busy_timeout`` turns the remaining collisions into a wait
-    instead of an immediate "database is locked". Foreign keys are off by
-    default in SQLite, and the schema leans on ``ON DELETE CASCADE``.
+    Ingest processes several episodes at once, each in its own session, so the
+    engine has more than one write in flight. WAL lets readers proceed while a
+    write is happening, and ``busy_timeout`` turns the remaining collisions
+    into a wait instead of an immediate "database is locked". Foreign keys are
+    off by default in SQLite, and the schema leans on ``ON DELETE CASCADE``.
+
+    None of this covers a lock held *across* another writer's attempt, which is
+    why the vector store gets its own file — see ``Settings.mem0_database_url``.
     """
 
     @event.listens_for(engine.sync_engine, "connect")

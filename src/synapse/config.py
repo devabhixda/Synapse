@@ -12,6 +12,7 @@ leaving embeddings to a second deployment with its own URL, key, and dimension.
 """
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -69,14 +70,24 @@ class Settings(BaseSettings):
 
     @property
     def mem0_database_url(self) -> str:
-        """The SQLite file the vector store writes to.
+        """The SQLite file the vector store writes to: a sibling of the main one.
 
         Mem0 opens the file with ``sqlite3`` rather than through SQLAlchemy, so
         it needs a filesystem path where ``database_url`` carries a driver.
-        Both point at the same file, which is the point: memory is one file to
-        back up and one file to delete.
+
+        Deliberately not the same file. ``SystemOneService.process`` flushes the
+        new episode — taking SQLite's one write lock — and commits only after
+        the vector write has returned, so a vector store on that file waits for
+        a lock held by the call it is blocking. That is a deadlock, not
+        contention: every index write fails with "database is locked" no matter
+        how long the busy timeout is, and the episode lands with a NULL
+        ``mem0_id`` because indexing is best-effort.
         """
-        return sqlite_path(self.database_url)
+        path = sqlite_path(self.database_url)
+        if path == ":memory:":
+            return path
+        p = Path(path)
+        return str(p.with_name(f"{p.stem}.vectors{p.suffix}"))
 
 
 @lru_cache

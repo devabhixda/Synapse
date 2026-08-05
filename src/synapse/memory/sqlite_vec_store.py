@@ -6,8 +6,8 @@ Chroma pulls 389 MB of site-packages for a venv the desktop app builds on
 first launch, and neither implements ``keyword_search``, so Mem0 silently
 drops BM25 from hybrid scoring and recall regresses with only a log warning.
 This provider is one dependency with a 67 KB dylib, and it backs
-``keyword_search`` with FTS5 to keep parity with the pgvector store it
-replaces.
+``keyword_search`` with FTS5 — stemming both sides with SQLite's own Porter
+tokenizer — to keep parity with the pgvector store it replaces.
 
 Three tables per collection. The items table is the source of truth and holds
 the payload and the raw embedding; the ``vec0`` and FTS5 tables are indexes
@@ -36,6 +36,17 @@ from mem0.vector_stores.base import VectorStoreBase  # type: ignore[import-untyp
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+# FTS5 stems both the indexed text and the query, so "deployments" answers a
+# search for "deployment". Mem0 expects spaCy to have lemmatized the text into
+# ``text_lemmatized`` before it arrives, but spaCy and its model add ~139 MB to
+# a venv the desktop app builds on first launch — the same cost that ruled out
+# Chroma above. Porter is built into SQLite, costs nothing, and is applied to
+# both sides by definition, so the two can never fall out of step. It
+# over-stems where a lemmatizer would not ("organization" and "organize" share
+# a stem), which is the trade: recall over precision on the keyword leg of a
+# hybrid search whose other leg is already semantic.
+_FTS_TOKENIZER = "porter unicode61"
 
 # Mem0's filter grammar, mirrored from the pgvector provider so that a filter
 # that worked there keeps working here. The bool is whether the comparison is
@@ -217,11 +228,13 @@ class SqliteVecStore(VectorStoreBase):  # type: ignore[misc]
 
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
-        # The SQLAlchemy engine writes to this same file, so a writer here can
-        # find it locked. Wait rather than failing the call.
+        # This file is the vector store's alone (see `Settings.mem0_database_url`),
+        # but a second process — a CLI run alongside the app — can still hold it.
+        # Wait rather than failing the call.
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._vec_available = self._load_extension()
         self.create_col()
+        self._migrate_fts_tokenizer()
 
     # -- setup -------------------------------------------------------------
 
@@ -295,7 +308,42 @@ class SqliteVecStore(VectorStoreBase):  # type: ignore[misc]
                     )"""
                 )
             self._conn.execute(
-                f"CREATE VIRTUAL TABLE IF NOT EXISTS {self._fts} USING fts5(content)"
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS {self._fts} "
+                f"USING fts5(content, tokenize='{_FTS_TOKENIZER}')"
+            )
+
+    def _migrate_fts_tokenizer(self) -> None:
+        """Rebuild the keyword index if it predates the stemming tokenizer.
+
+        FTS5 fixes a tokenizer when the table is created and ``IF NOT EXISTS``
+        will not change one, so a file written before this store stemmed keeps
+        matching literally: a search for "deployment" misses "deployments", and
+        "run" misses "running". Replaying the items table costs no model calls
+        — the payloads are already there — which is the reason the derived
+        indexes are kept derivable.
+        """
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (f"{self.collection_name}_fts",),
+        ).fetchone()
+        if row is None or _FTS_TOKENIZER in (row[0] or ""):
+            return
+
+        logger.info("rebuilding %s with the '%s' tokenizer", self._fts, _FTS_TOKENIZER)
+        with self._lock, self._conn:
+            self._conn.execute(f"DROP TABLE IF EXISTS {self._fts}")
+            self._conn.execute(
+                f"CREATE VIRTUAL TABLE {self._fts} "
+                f"USING fts5(content, tokenize='{_FTS_TOKENIZER}')"
+            )
+            self._conn.executemany(
+                f"INSERT INTO {self._fts}(rowid, content) VALUES (?, ?)",
+                (
+                    (rowid, self._lemmatized(json.loads(payload)))
+                    for rowid, payload in self._conn.execute(
+                        f"SELECT rowid, payload FROM {self._items}"
+                    ).fetchall()
+                ),
             )
 
     # -- helpers -----------------------------------------------------------
