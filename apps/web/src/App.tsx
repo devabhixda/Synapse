@@ -364,7 +364,7 @@ function AwakeView({ episodes, health, loading, error, onRefresh }: {
       <section className="timeline-section">
         <div className="section-heading">
           <div><p className="eyebrow">Episodic stream</p><h2>Immediate observations</h2></div>
-          <span className="model-chip">{health?.models.chat ?? 'google/gemma-4-E2B-it'}</span>
+          <span className="model-chip">{health?.models.chat || 'chat model'}</span>
         </div>
         {loading ? (
           <div className="empty-state">Loading episodes...</div>

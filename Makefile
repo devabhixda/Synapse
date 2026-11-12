@@ -1,4 +1,4 @@
-.PHONY: up down build logs replay slack-preview slack-import test lint reset cactus
+.PHONY: up down build logs replay slack-preview slack-import test lint reset
 
 up:
 	docker compose up -d --build --wait
@@ -40,6 +40,3 @@ lint:
 
 reset:
 	docker compose down --volumes
-
-cactus:
-	sh scripts/cactus-host.sh
