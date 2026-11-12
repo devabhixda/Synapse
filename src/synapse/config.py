@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     # when pointing at one; it costs nothing on a model that doesn't reason,
     # which stops when it is done rather than when it hits the cap.
     chat_reasoning_tokens: int = Field(default=0, ge=0)
+    # Seconds System 1 waits to label one conversation. Eight is plenty for a
+    # model that answers directly; a reasoning model on a long conversation
+    # (a busy channel's whole day) can think past it, and a timeout costs the
+    # episode its model label (it falls back to the rule-based one).
+    chat_classify_timeout: float = Field(default=8, gt=0)
     inference_mode: str = "auto"
     consolidation_mode: str = "auto"
     crustdata_api_key: str | None = None

@@ -175,7 +175,7 @@ class LLMInterpreter:
                     {"role": "user", "content": event.content},
                 ],
                 max_tokens=48,
-                timeout=8,
+                timeout=self.settings.chat_classify_timeout,
             )
             classification = FastClassification.model_validate(
                 parse_json_object(message_content(body))
@@ -198,8 +198,11 @@ class LLMInterpreter:
             ValueError,
             json.JSONDecodeError,
         ) as error:
+            # A timeout's message is empty, which left the log line ending in
+            # ": " with nothing to say what went wrong. Name the type too.
             raise MalformedResponse(
-                f"System 1 classification failed for {event.source_id}: {error}"
+                f"System 1 classification failed for {event.source_id}: "
+                f"{type(error).__name__}: {error}"
             ) from error
 
 
