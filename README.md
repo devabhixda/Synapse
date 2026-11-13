@@ -57,8 +57,7 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from synapse.config import Settings
-from synapse.db import models  # noqa: F401  registers the tables
-from synapse.db.base import Base
+from synapse.db.schema import create_schema
 from synapse.db.models import SourceType
 from synapse.db.pragmas import configure_sqlite
 from synapse.domain.models import SourceEvent
@@ -83,7 +82,7 @@ async def main() -> None:
     engine = create_async_engine(settings.database_url)
     configure_sqlite(engine)  # WAL, a busy timeout, foreign keys
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(create_schema)  # tables, and columns newer releases added
     sessions = async_sessionmaker(engine, expire_on_commit=False)
 
     index = Mem0EpisodeStore(settings)
@@ -145,6 +144,26 @@ close the previous edge when a new one is asserted; predicates that accumulate
 (`mentions`, `depends_on`, `blocks`) never close that way. Order comes from the
 conversations, not import order, so importing an old export cannot retire a
 newer fact. Reads return current edges by default.
+
+Some facts are sentences, not edges: "to raise GPU quota, ask in #ask-cpe with
+the org ID; about a day". A **statement** attaches one to an entity under a
+key (`how_to_request`). An entity has one current statement per key, so a new
+text versions the old one by the same rules.
+
+A writer that works conversation by conversation, such as an agent, applies a
+plan of entities, edges and statements without a full run:
+
+```python
+from synapse.consolidation.service import apply_plan
+from synapse.db.models import ReviewStatus
+
+await apply_plan(plan, "acme", session, status=ReviewStatus.PROPOSED)
+```
+
+Each edge or statement can carry the quote that supports it, which is checked
+against its episode, and when it was said. Written as `PROPOSED`, it is stored
+but not read, and retires nothing, until `review_relationship` or
+`review_statement` accepts it.
 
 ### Recall
 

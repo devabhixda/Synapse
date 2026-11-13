@@ -79,6 +79,34 @@ def test_keyword_search_is_scoped_by_filters(store: SqliteVecStore) -> None:
     assert "d" not in [r.id for r in results]
 
 
+def test_keyword_search_filters_before_taking_top_k(store: SqliteVecStore) -> None:
+    """The best match overall is another user's; the one slot still goes to acme."""
+    store.insert(
+        vectors=[[1, 0, 0, 0]],
+        payloads=[payload("gateway gateway gateway timeout timeout", "globex")],
+        ids=["e"],
+    )
+    results = store.keyword_search("gateway timeout", top_k=1, filters={"user_id": "acme"})
+
+    assert results is not None
+    assert [r.id for r in results] == ["a"]
+
+
+def test_keyword_search_matches_every_filter(store: SqliteVecStore) -> None:
+    store.insert(
+        vectors=[[1, 0, 0, 0]],
+        payloads=[payload("gateway timeout retired", "acme", status="deleted")],
+        ids=["f"],
+    )
+    results = store.keyword_search(
+        "gateway timeout", top_k=10, filters={"user_id": "acme", "status": "active"}
+    )
+
+    assert results is not None
+    assert "f" not in [r.id for r in results]
+    assert store.keyword_search("gateway", filters={"user_id": "nobody"}) == []
+
+
 def test_keyword_search_survives_punctuation(store: SqliteVecStore) -> None:
     """FTS5 operator characters in a query must not blow up the BM25 leg."""
     results = store.keyword_search('gateway "OR" (timeout)*', top_k=5)
