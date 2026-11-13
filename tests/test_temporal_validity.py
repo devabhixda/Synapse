@@ -227,3 +227,99 @@ async def test_retired_edges_do_not_reach_recall_answers(session) -> None:
 
     stored = list(await session.scalars(select(SemanticRelationship)))
     assert len(stored) == 2, "history should still be on disk, just not in the answer"
+
+
+def owns(who: str, source_id: str, **extra) -> Spec:
+    return Spec(subject_key=f"Person:{who}", predicate="owns", object_key="Task:demo",
+                evidence_source_ids=[source_id], **extra)
+
+
+async def owners(session) -> list[str]:
+    return sorted(edge.subject.canonical_name for edge in await edges(ACME, session))
+
+
+async def test_edges_are_applied_in_the_order_they_were_said(session) -> None:
+    """Plans are sorted by key. Applied that way, Priya (July) went in before Sam
+    (March), who then found nothing he could close and stayed current too."""
+    await add_episode(ACME, "march", MARCH, session)
+    await add_episode(ACME, "july", JULY, session)
+    await consolidate(ACME, [owns("priya", "july"), owns("sam", "march")], session)
+
+    assert await owners(session) == ["Priya"]
+
+
+async def test_a_rebuild_does_not_reopen_what_was_retired(session) -> None:
+    """Every run re-asserts every edge from the evidence it always had."""
+    await add_episode(ACME, "march", MARCH, session)
+    await add_episode(ACME, "july", JULY, session)
+    both = [owns("priya", "july"), owns("sam", "march")]
+    await consolidate(ACME, both, session)
+    await consolidate(ACME, both, session)
+
+    assert await owners(session) == ["Priya"]
+    sam = next(e for e in await edges(ACME, session, include_superseded=True)
+               if e.subject.canonical_name == "Sam")
+    assert (sam.valid_at, sam.invalid_at) == (MARCH, JULY)
+
+
+async def test_an_old_fact_that_arrives_late_is_stored_already_retired(session) -> None:
+    await add_episode(ACME, "july", JULY, session)
+    await consolidate(ACME, [owns("priya", "july")], session)
+    await add_episode(ACME, "march", MARCH, session)
+    await consolidate(ACME, [owns("sam", "march")], session)
+
+    assert await owners(session) == ["Priya"]
+
+
+async def test_an_edge_can_be_dated_by_the_message_that_decided_it(session) -> None:
+    """A reply in August on a thread from March is an August fact."""
+    await add_episode(ACME, "march", MARCH, session)
+    await add_episode(ACME, "july", JULY, session)
+    august = JULY + timedelta(days=30)
+    await consolidate(ACME, [owns("priya", "july"),
+                             owns("sam", "march", asserted_at=august)], session)
+
+    assert await owners(session) == ["Sam"]
+
+
+async def test_evidence_keeps_the_quote_and_refuses_one_that_was_not_said(session) -> None:
+    import pytest
+
+    await add_episode(ACME, "march", MARCH, session)
+    await consolidate(ACME, [owns("sam", "march", evidence_quotes={"march": "march  said"})],
+                      session)
+    [edge] = await edges(ACME, session)
+    assert [item.excerpt for item in edge.evidence] == ["march  said"]
+
+    with pytest.raises(ValueError, match="does not appear"):
+        await consolidate(ACME, [owns("priya", "march",
+                                      evidence_quotes={"march": "Priya owns it now"})], session)
+
+
+async def test_a_plan_can_be_applied_without_a_full_run(session) -> None:
+    from synapse.consolidation.service import (
+        FunctionalPredicates,
+        apply_plan,
+        retire_relationship,
+    )
+
+    await add_episode(ACME, "march", MARCH, session)
+    await add_episode(ACME, "july", JULY, session)
+    practice = FunctionalPredicates(subject=frozenset({"asks_in"}))
+
+    def asks_in(where: str, source_id: str) -> ConsolidationPlan:
+        return ConsolidationPlan(entities=PEOPLE, relationships=[
+            Spec(subject_key="Task:demo", predicate="asks_in", object_key=where,
+                 evidence_source_ids=[source_id])])
+
+    await apply_plan(asks_in("Task:spike", "march"), ACME, session, functional=practice)
+    diff = await apply_plan(asks_in("Person:sam", "july"), ACME, session, functional=practice)
+    await session.commit()
+    assert (diff.created, diff.superseded) == (1, 1)
+    [current] = await edges(ACME, session)
+    assert current.object.canonical_name == "Sam"
+
+    assert await retire_relationship(current.id, ACME, JULY + timedelta(days=1), session)
+    assert not await retire_relationship(current.id, ACME, JULY, session)
+    await session.commit()
+    assert await edges(ACME, session) == []
