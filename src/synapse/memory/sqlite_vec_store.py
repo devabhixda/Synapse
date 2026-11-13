@@ -525,15 +525,13 @@ class SqliteVecStore(VectorStoreBase):  # type: ignore[misc]
                 match = _fts_query(query)
                 if not match:
                     return []
-                candidates = self._candidate_rowids(filters)
-                if candidates is not None and not candidates:
-                    return []
-                params: list[Any] = [match]
-                restrict = ""
-                if candidates is not None:
-                    restrict = " WHERE m.rid IN (SELECT value FROM json_each(?))"
-                    params.append(json.dumps(candidates))
-                params.append(top_k)
+                conditions, filter_params = _build_filters(filters)
+                params: list[Any] = [match, *filter_params, top_k]
+                # The filters apply to the joined payload, not to a list of
+                # candidate rowids: `rid IN (SELECT value FROM json_each(?))`
+                # over a group's every chunk took 4-7s a query at 6,000 chunks,
+                # where filtering the matched rows directly takes ~25ms.
+                restrict = (" WHERE " + " AND ".join(conditions)) if conditions else ""
                 # FTS5 resolves MATCH and bm25() against the table name, not
                 # against a join alias, so the match runs in a subquery and the
                 # payload is joined onto its result.
