@@ -1,3 +1,4 @@
+import hashlib
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -10,7 +11,12 @@ from sqlalchemy.orm import selectinload
 from synapse.config import Settings, get_settings
 from synapse.consolidation.extractor import normalize_name
 from synapse.consolidation.llm_extractor import LLMSemanticExtractor, SemanticExtractor
-from synapse.consolidation.models import ConsolidationPlan, EntitySpec, RelationshipSpec
+from synapse.consolidation.models import (
+    ConsolidationPlan,
+    EntitySpec,
+    RelationshipSpec,
+    StatementSpec,
+)
 from synapse.db.models import (
     ConsolidationEpisode,
     ConsolidationRun,
@@ -19,8 +25,11 @@ from synapse.db.models import (
     EpisodeKind,
     ExternalAttribute,
     RelationshipEvidence,
+    ReviewStatus,
     SemanticEntity,
     SemanticRelationship,
+    SemanticStatement,
+    StatementEvidence,
 )
 from synapse.enrichment.crustdata import CompanyEnricher, CrustdataEnricher
 
@@ -115,7 +124,9 @@ async def upsert_entities(
     return entity_by_key, created, updated
 
 
-def _asserted_at(spec: RelationshipSpec, episodes: Mapping[str, Episode]) -> datetime:
+def _asserted_at(
+    spec: RelationshipSpec | StatementSpec, episodes: Mapping[str, Episode]
+) -> datetime:
     """When the edge became true: when it was said, not when it was read.
 
     Ordering supersession by write time would let a late import of old
@@ -131,7 +142,9 @@ def _asserted_at(spec: RelationshipSpec, episodes: Mapping[str, Episode]) -> dat
     return max(times) if times else datetime.now(UTC)
 
 
-def _evidence_excerpt(spec: RelationshipSpec, episode: Episode) -> str:
+def _evidence_excerpt(
+    spec: RelationshipSpec | StatementSpec, label: str, episode: Episode
+) -> str:
     quote = spec.evidence_quotes.get(episode.source_id or "")
     if quote is None:
         return episode.content
@@ -140,8 +153,7 @@ def _evidence_excerpt(spec: RelationshipSpec, episode: Episode) -> str:
     # and evidence that was not said is worse than none.
     if " ".join(quote.split()) not in " ".join(episode.content.split()):
         raise ValueError(
-            f"evidence quote for {spec.subject_key} {spec.predicate} {spec.object_key} "
-            f"does not appear in episode {episode.source_id}"
+            f"evidence quote for {label} does not appear in episode {episode.source_id}"
         )
     return quote
 
@@ -154,8 +166,12 @@ async def apply_relationships(
     session: AsyncSession,
     *,
     functional: FunctionalPredicates | None = None,
+    status: ReviewStatus = ReviewStatus.ACTIVE,
 ) -> RelationshipDiff:
     """Merge edges into the graph, oldest assertion first.
+
+    ``status`` is what new edges are written as. A proposed edge supersedes
+    nothing until it is approved; an edge that is already active stays so.
 
     The order matters. Supersession compares when edges became true, and an
     edge can only close ones that were already true when it was asserted.
@@ -191,6 +207,7 @@ async def apply_relationships(
                 attributes=relationship_spec.attributes,
                 confidence=relationship_spec.confidence,
                 valid_at=asserted_at,
+                status=status,
             )
             session.add(relationship)
             diff.created += 1
@@ -201,6 +218,8 @@ async def apply_relationships(
                 **relationship_spec.attributes,
             }
             relationship.confidence = max(relationship.confidence, relationship_spec.confidence)
+            if relationship.status == ReviewStatus.PROPOSED and status == ReviewStatus.ACTIVE:
+                relationship.status = ReviewStatus.ACTIVE
             if relationship.invalid_at is not None and asserted_at > relationship.invalid_at:
                 # Asserted again after being retired: true once more, as of
                 # this assertion. Only a later assertion does that. A rebuild
@@ -224,7 +243,12 @@ async def apply_relationships(
                         group_id=group_id,
                         relationship_id=relationship.id,
                         episode_id=episode.id,
-                        excerpt=_evidence_excerpt(relationship_spec, episode),
+                        excerpt=_evidence_excerpt(
+                            relationship_spec,
+                            f"{relationship_spec.subject_key} {relationship_spec.predicate} "
+                            f"{relationship_spec.object_key}",
+                            episode,
+                        ),
                         confidence=relationship_spec.confidence,
                     )
                 )
@@ -238,15 +262,20 @@ async def apply_plan(
     session: AsyncSession,
     *,
     functional: FunctionalPredicates | None = None,
+    status: ReviewStatus = ReviewStatus.ACTIVE,
 ) -> RelationshipDiff:
-    """Merge a plan's entities and edges into the graph, without a full run.
+    """Merge a plan's entities, edges and statements into the graph, without a full run.
 
     For a writer that works incrementally, such as an agent reading new
     conversations: the same merge a consolidation run does, over just these
-    specs. Evidence episodes are looked up by source id. Flushes; the caller
-    commits.
+    specs. Evidence episodes are looked up by source id. Edges and statements
+    are written with ``status``, so an untrusted writer passes ``PROPOSED``.
+    Entities carry no status: one that only proposals mention is inert.
+    Flushes; the caller commits. The counts cover edges and statements.
     """
-    source_ids = {sid for spec in plan.relationships for sid in spec.evidence_source_ids}
+    source_ids = {sid for spec in plan.relationships for sid in spec.evidence_source_ids} | {
+        sid for stated in plan.statements for sid in stated.evidence_source_ids
+    }
     episodes = (
         {
             episode.source_id: episode
@@ -261,9 +290,206 @@ async def apply_plan(
         else {}
     )
     entity_by_key, _, _ = await upsert_entities(plan.entities, group_id, session)
-    return await apply_relationships(
-        plan.relationships, entity_by_key, episodes, group_id, session, functional=functional
+    diff = await apply_relationships(
+        plan.relationships,
+        entity_by_key,
+        episodes,
+        group_id,
+        session,
+        functional=functional,
+        status=status,
     )
+    stated = await apply_statements(
+        plan.statements, entity_by_key, episodes, group_id, session, status=status
+    )
+    return RelationshipDiff(
+        diff.created + stated.created,
+        diff.updated + stated.updated,
+        diff.superseded + stated.superseded,
+    )
+
+
+def statement_fingerprint(text: str) -> str:
+    return hashlib.sha256(" ".join(text.lower().split()).encode()).hexdigest()
+
+
+async def apply_statements(
+    specs: Sequence[StatementSpec],
+    entity_by_key: Mapping[str, SemanticEntity],
+    episode_by_source_id: Mapping[str, Episode],
+    group_id: str,
+    session: AsyncSession,
+    *,
+    status: ReviewStatus = ReviewStatus.ACTIVE,
+) -> RelationshipDiff:
+    """Merge statements, oldest first, by the rules edges follow.
+
+    An entity has one current statement per key, so a new text retires the
+    previous one. The same text asserted again gains evidence instead.
+    """
+    diff = RelationshipDiff()
+    dated = sorted(
+        ((_asserted_at(spec, episode_by_source_id), spec) for spec in specs),
+        key=lambda pair: pair[0],
+    )
+    for asserted_at, spec in dated:
+        entity = entity_by_key[spec.entity_key]
+        fingerprint = statement_fingerprint(spec.text)
+        statement = await session.scalar(
+            select(SemanticStatement)
+            .options(selectinload(SemanticStatement.evidence))
+            .where(
+                SemanticStatement.group_id == group_id,
+                SemanticStatement.entity_id == entity.id,
+                SemanticStatement.key == spec.key,
+                SemanticStatement.fingerprint == fingerprint,
+            )
+        )
+        if statement is None:
+            statement = SemanticStatement(
+                group_id=group_id,
+                entity_id=entity.id,
+                key=spec.key,
+                text=spec.text,
+                fingerprint=fingerprint,
+                attributes=spec.attributes,
+                confidence=spec.confidence,
+                valid_at=asserted_at,
+                status=status,
+            )
+            session.add(statement)
+            diff.created += 1
+            evidence_episode_ids: set[object] = set()
+        else:
+            statement.attributes = {**statement.attributes, **spec.attributes}
+            statement.confidence = max(statement.confidence, spec.confidence)
+            if statement.status == ReviewStatus.PROPOSED and status == ReviewStatus.ACTIVE:
+                statement.status = ReviewStatus.ACTIVE
+            if statement.invalid_at is not None and asserted_at > statement.invalid_at:
+                statement.invalid_at = None
+                statement.valid_at = asserted_at
+            diff.updated += 1
+            evidence_episode_ids = {item.episode_id for item in statement.evidence}
+        await session.flush()
+
+        diff.superseded += await _supersede_statement(statement, asserted_at, session)
+
+        for source_id in spec.evidence_source_ids:
+            episode = episode_by_source_id.get(source_id)
+            if episode and episode.id not in evidence_episode_ids:
+                session.add(
+                    StatementEvidence(
+                        group_id=group_id,
+                        statement_id=statement.id,
+                        episode_id=episode.id,
+                        excerpt=_evidence_excerpt(spec, f"{spec.entity_key} {spec.key}", episode),
+                        confidence=spec.confidence,
+                    )
+                )
+                evidence_episode_ids.add(episode.id)
+    return diff
+
+
+async def _supersede_statement(
+    statement: SemanticStatement, asserted_at: datetime, session: AsyncSession
+) -> int:
+    """``_supersede`` for statements: one current text per entity and key."""
+    if statement.invalid_at is not None or statement.status != ReviewStatus.ACTIVE:
+        return 0
+    held_at = max(statement.valid_at, asserted_at)
+    others = (
+        SemanticStatement.entity_id == statement.entity_id,
+        SemanticStatement.key == statement.key,
+        SemanticStatement.id != statement.id,
+        SemanticStatement.status == ReviewStatus.ACTIVE,
+    )
+    closed = 0
+    for other in await session.scalars(
+        select(SemanticStatement).where(
+            *others,
+            SemanticStatement.invalid_at.is_(None),
+            SemanticStatement.valid_at <= held_at,
+        )
+    ):
+        other.invalid_at = held_at
+        closed += 1
+    successor = await session.scalar(
+        select(func.min(SemanticStatement.valid_at)).where(
+            *others, SemanticStatement.valid_at > held_at
+        )
+    )
+    if successor is not None:
+        statement.invalid_at = successor
+    return closed
+
+
+async def review_relationship(
+    relationship_id: uuid.UUID,
+    group_id: str,
+    approve: bool,
+    session: AsyncSession,
+    *,
+    functional: FunctionalPredicates | None = None,
+) -> bool:
+    """Accept or reject a proposed edge. False when there is no such proposal.
+
+    Approval is when the edge takes effect: only now does it retire what it
+    contradicts, dated from when it was said, not from when it was approved.
+    """
+    edge = await session.scalar(
+        select(SemanticRelationship).where(
+            SemanticRelationship.id == relationship_id,
+            SemanticRelationship.group_id == group_id,
+            SemanticRelationship.status == ReviewStatus.PROPOSED,
+        )
+    )
+    if edge is None:
+        return False
+    edge.status = ReviewStatus.ACTIVE if approve else ReviewStatus.REJECTED
+    await session.flush()
+    if approve:
+        await _supersede(
+            edge, group_id, edge.valid_at, session, functional or FunctionalPredicates()
+        )
+    return True
+
+
+async def review_statement(
+    statement_id: uuid.UUID, group_id: str, approve: bool, session: AsyncSession
+) -> bool:
+    """Accept or reject a proposed statement; see ``review_relationship``."""
+    statement = await session.scalar(
+        select(SemanticStatement).where(
+            SemanticStatement.id == statement_id,
+            SemanticStatement.group_id == group_id,
+            SemanticStatement.status == ReviewStatus.PROPOSED,
+        )
+    )
+    if statement is None:
+        return False
+    statement.status = ReviewStatus.ACTIVE if approve else ReviewStatus.REJECTED
+    await session.flush()
+    if approve:
+        await _supersede_statement(statement, statement.valid_at, session)
+    return True
+
+
+async def retire_statement(
+    statement_id: uuid.UUID, group_id: str, at: datetime, session: AsyncSession
+) -> bool:
+    """Close one statement as of ``at``; see ``retire_relationship``."""
+    statement = await session.scalar(
+        select(SemanticStatement).where(
+            SemanticStatement.id == statement_id,
+            SemanticStatement.group_id == group_id,
+            SemanticStatement.invalid_at.is_(None),
+        )
+    )
+    if statement is None:
+        return False
+    statement.invalid_at = max(at, statement.valid_at)
+    await session.flush()
+    return True
 
 
 async def retire_relationship(
@@ -320,10 +546,12 @@ async def _supersede(
     same = (
         SemanticRelationship.group_id == group_id,
         SemanticRelationship.predicate == predicate,
+        # Proposals neither retire accepted edges nor are retired by them.
+        SemanticRelationship.status == ReviewStatus.ACTIVE,
         *conflict,
     )
 
-    if relationship.invalid_at is not None:
+    if relationship.invalid_at is not None or relationship.status != ReviewStatus.ACTIVE:
         return 0
     # The latest moment this edge is known to hold: an open edge affirmed
     # again later still dates from when it began, but it outranks anything

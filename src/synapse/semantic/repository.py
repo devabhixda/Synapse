@@ -1,12 +1,21 @@
 import json
 import re
+import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from synapse.db.models import RelationshipEvidence, SemanticEntity, SemanticRelationship
+from synapse.db.models import (
+    RelationshipEvidence,
+    ReviewStatus,
+    SemanticEntity,
+    SemanticRelationship,
+    SemanticStatement,
+    StatementEvidence,
+)
 from synapse.recall.models import RecallCitation
 
 
@@ -32,16 +41,22 @@ async def load_entities(group_id: str, session: AsyncSession) -> list[SemanticEn
 
 
 async def load_relationships(
-    group_id: str, session: AsyncSession, *, include_superseded: bool = False
+    group_id: str,
+    session: AsyncSession,
+    *,
+    include_superseded: bool = False,
+    statuses: Sequence[ReviewStatus] = (ReviewStatus.ACTIVE,),
 ) -> list[SemanticRelationship]:
-    """Edges for one account, current ones only unless asked otherwise.
+    """Edges for one account: current and accepted ones unless asked otherwise.
 
     Retired edges stay in the table so history can be reconstructed, but an
     answer built from them would state as fact something already contradicted,
-    so they are excluded by default.
+    so they are excluded by default. So are proposals nobody has accepted;
+    pass ``statuses`` to read a review queue.
     """
     statement = select(SemanticRelationship).where(
-        SemanticRelationship.group_id == group_id
+        SemanticRelationship.group_id == group_id,
+        SemanticRelationship.status.in_(statuses),
     )
     if not include_superseded:
         statement = statement.where(SemanticRelationship.invalid_at.is_(None))
@@ -54,6 +69,35 @@ async def load_relationships(
                     RelationshipEvidence.episode
                 ),
             ).order_by(SemanticRelationship.predicate, SemanticRelationship.id)
+        )
+    )
+
+
+async def load_statements(
+    group_id: str,
+    session: AsyncSession,
+    *,
+    entity_ids: Sequence[uuid.UUID] | None = None,
+    include_superseded: bool = False,
+    statuses: Sequence[ReviewStatus] = (ReviewStatus.ACTIVE,),
+) -> list[SemanticStatement]:
+    """Statements for one account, by the defaults ``load_relationships`` uses."""
+    statement = select(SemanticStatement).where(
+        SemanticStatement.group_id == group_id,
+        SemanticStatement.status.in_(statuses),
+    )
+    if entity_ids is not None:
+        statement = statement.where(SemanticStatement.entity_id.in_(entity_ids))
+    if not include_superseded:
+        statement = statement.where(SemanticStatement.invalid_at.is_(None))
+    return list(
+        await session.scalars(
+            statement.options(
+                selectinload(SemanticStatement.entity),
+                selectinload(SemanticStatement.evidence).selectinload(
+                    StatementEvidence.episode
+                ),
+            ).order_by(SemanticStatement.key, SemanticStatement.id)
         )
     )
 
@@ -120,6 +164,24 @@ async def search_semantic_context(
             )
             selected_ids.append(str(external.id))
         answer_parts.append(". ".join(part.rstrip(".") for part in detail_parts) + ".")
+
+    for stated in await load_statements(
+        group_id, session, entity_ids=[entity.id for entity in matched_entities]
+    ):
+        answer_parts.append(
+            f"{stated.entity.canonical_name} ({stated.key.replace('_', ' ')}): "
+            f"{stated.text.rstrip('.')}."
+        )
+        selected_ids.append(str(stated.id))
+        for proof in stated.evidence:
+            citation = RecallCitation(
+                kind="episode",
+                id=str(proof.episode_id),
+                label=f"{proof.episode.source_type.value} episode",
+                excerpt=proof.excerpt,
+            )
+            if citation.id not in {item.id for item in citations}:
+                citations.append(citation)
 
     for relationship in connected:
         answer_parts.append(

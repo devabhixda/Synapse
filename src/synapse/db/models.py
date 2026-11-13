@@ -121,6 +121,21 @@ source_type_enum = Enum(
 GROUP_ID_LENGTH = 120
 
 
+class ReviewStatus(StrEnum):
+    """Whether a piece of the graph has been accepted.
+
+    A writer that is not yet trusted (an agent in shadow mode, or one whose
+    output a person reviews) writes ``PROPOSED``. Proposals are stored with
+    their evidence but are not read by default and supersede nothing; accepting
+    one makes it ``ACTIVE`` and only then does it retire what it contradicts.
+    ``REJECTED`` is kept so the same proposal is not raised again.
+    """
+
+    ACTIVE = "active"
+    PROPOSED = "proposed"
+    REJECTED = "rejected"
+
+
 class Tenanted:
     """Mixin marking a table as owned by one account.
 
@@ -435,6 +450,11 @@ class SemanticRelationship(Tenanted, Base):
     invalid_at: Mapped[datetime | None] = mapped_column(
         UtcDateTime, nullable=True
     )
+    # Whether the edge has been accepted; see ``ReviewStatus``. Added after
+    # databases existed, hence the constant server default (``create_schema``).
+    status: Mapped[str] = mapped_column(
+        String(16), default=ReviewStatus.ACTIVE, server_default=ReviewStatus.ACTIVE
+    )
     created_at: Mapped[datetime] = mapped_column(
         UtcDateTime, server_default=func.now()
     )
@@ -466,4 +486,71 @@ class RelationshipEvidence(Tenanted, Base):
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
 
     semantic_relationship: Mapped[SemanticRelationship] = relationship(back_populates="evidence")
+    episode: Mapped[Episode] = relationship()
+
+
+class SemanticStatement(Tenanted, Base):
+    """Something true about an entity that an edge cannot say: a sentence.
+
+    "To raise GPU quota, ask in #ask-cpe with the org ID; about a day" is a
+    fact about the entity *GPU quota*, with conditions no subject-predicate-
+    object triple holds. ``key`` names which fact it is ("how_to_request"),
+    and an entity has one current statement per key: a new text under the same
+    key retires the previous one, exactly as a new owner retires the old.
+    That is what versions a practice. The old text stays, with its period.
+
+    Entities themselves have no validity period and their description is
+    written once, so a practice kept as an entity could never change.
+    """
+
+    __tablename__ = "semantic_statements"
+    __table_args__ = (
+        UniqueConstraint("entity_id", "key", "fingerprint", name="uq_semantic_statement"),
+        Index("ix_semantic_statements_group_current", "group_id", "invalid_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("semantic_entities.id", ondelete="CASCADE"), index=True
+    )
+    key: Mapped[str] = mapped_column(String(120))
+    text: Mapped[str] = mapped_column(Text)
+    # sha256 of the normalised text: the same sentence asserted again is the
+    # same statement gaining evidence, not a new version.
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    attributes: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    valid_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    invalid_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(16), default=ReviewStatus.ACTIVE, server_default=ReviewStatus.ACTIVE
+    )
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    entity: Mapped[SemanticEntity] = relationship()
+    evidence: Mapped[list["StatementEvidence"]] = relationship(
+        back_populates="statement", cascade="all, delete-orphan"
+    )
+
+
+class StatementEvidence(Tenanted, Base):
+    __tablename__ = "statement_evidence"
+    __table_args__ = (
+        UniqueConstraint("statement_id", "episode_id", name="uq_statement_evidence"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    statement_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("semantic_statements.id", ondelete="CASCADE"), index=True
+    )
+    episode_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("episodes.id", ondelete="CASCADE"), index=True
+    )
+    excerpt: Mapped[str] = mapped_column(Text)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+
+    statement: Mapped[SemanticStatement] = relationship(back_populates="evidence")
     episode: Mapped[Episode] = relationship()

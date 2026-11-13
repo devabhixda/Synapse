@@ -31,9 +31,23 @@ class RelationshipSpec(BaseModel):
     asserted_at: datetime | None = None
 
 
+class StatementSpec(BaseModel):
+    """A sentence about an entity; see ``SemanticStatement``."""
+
+    entity_key: str
+    key: str
+    text: str
+    evidence_source_ids: list[str]
+    evidence_quotes: dict[str, str] = Field(default_factory=dict)
+    asserted_at: datetime | None = None
+    attributes: dict[str, str] = Field(default_factory=dict)
+    confidence: float = Field(default=1.0, ge=0, le=1)
+
+
 class ConsolidationPlan(BaseModel):
     entities: list[EntitySpec]
     relationships: list[RelationshipSpec]
+    statements: list[StatementSpec] = Field(default_factory=list)
 
 
 class ExtractionResult(BaseModel):

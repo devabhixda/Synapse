@@ -24,8 +24,8 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from synapse.db import models  # noqa: F401 — imported so Base.metadata sees every table
-from synapse.db.base import Base
 from synapse.db.pragmas import configure_sqlite
+from synapse.db.schema import create_schema
 
 
 @pytest_asyncio.fixture
@@ -34,7 +34,7 @@ async def sessions(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSess
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'synapse.db'}")
     configure_sqlite(engine)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(create_schema)
     try:
         yield async_sessionmaker(engine, expire_on_commit=False)
     finally:
