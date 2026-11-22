@@ -211,6 +211,8 @@ Settings are read from the environment (or a `.env` file), or passed to
 | `MEM0_WRITER_MODE` | `false` | Also have Mem0 extract standalone facts from each episode (see below) |
 | `MEM0_FACT_INSTRUCTIONS` | none | Extra guidance for that extraction |
 | `MEM0_FACT_CONTEXT_EPISODES` | `0` | Earlier episodes the extraction sees in full, up to 10 |
+| `MEM0_SUPERSESSION_CANDIDATES` | `3` | Current facts each new fact is checked against for conflicts; `0` turns the check off |
+| `MEM0_SUPERSESSION_THRESHOLD` | `0.5` | How similar a current fact must be to be checked |
 | `MEM0_COLLECTION` | `synapse_episodes` | The index's collection name; one per embedding model |
 | `MEMORY_HIT_THRESHOLD` | `0.62` | How close an episode must be to answer from it |
 | `INFERENCE_MODE` | `auto` | `fake` gives deterministic labels with no model, for tests |
@@ -278,18 +280,30 @@ that episode, `answer` is the matching facts alone and the citation quotes the
 chunks (or the whole conversation), never the paraphrase.
 Facts share `MEMORY_SEARCH_TOP_K` with chunks, so consider raising it.
 
-- *Cost:* one chat call per episode (input: the conversation, up to ten related
-  facts, plus `MEM0_FACT_CONTEXT_EPISODES` earlier episodes) and one embedding
-  per fact, on the configured models and keys, fallback keys included. A longer
+- *Cost:* per episode, one chat call to extract (input: the conversation, up to
+  ten related facts, plus `MEM0_FACT_CONTEXT_EPISODES` earlier episodes), one
+  embedding per fact, one batched embedding call for the supersession search,
+  and one small chat call to judge conflicts — skipped when no current fact is
+  similar enough — all on the configured models and keys, fallback keys
+  included. A longer
   version of an episode replaces its facts with a fresh extraction.
-- *Facts only accumulate.* Mem0 2.0 adds facts and drops exact repeats; it never
-  edits or deletes one, so it cannot touch chunks or recall's write-backs, but a
-  fact that stops being true stays alongside its successor. That is why the
-  judge sees each fact's date. The graph, which closes old facts rather than
-  keeping both, remains the record of what is true now.
+- *Corrections retire what they correct.* Mem0 2.0 only adds facts, so after
+  each extraction Synapse compares every new fact with the group's nearest
+  current facts from other conversations (`MEM0_SUPERSESSION_CANDIDATES`, at
+  least `MEM0_SUPERSESSION_THRESHOLD` similar) and one chat call names the pairs
+  that cannot both be true ("it's Krati, not Kathy"; "moving to Mumbai" after
+  "moving to Pune"). As in the graph, the older of each pair is closed, not
+  deleted: it keeps its text and gets `status: superseded`, `invalid_at` (when
+  the newer was said) and `superseded_by`, and recall no longer finds it. Order
+  comes from when each was said, so a conversation imported late has its own
+  fact retired instead of a newer one. When a growing thread is read again,
+  facts its old reading had retired are reinstated and checked against the new
+  reading. Mem0's ADD-only extraction never touches chunks or recall's
+  write-backs.
 - *Repair and backfill:* extraction runs after the episode is saved and a
-  failure costs only the facts; `reindex_missing` retries any source episode
-  that has none (including ones stored before writer mode), and
+  failure costs only the facts (or, for the conflict check, only the check);
+  `reindex_missing` retries either for any source episode (including ones
+  stored before writer mode), and
   `reindex_group` drops every vector and rebuilds, facts included.
 - Mem0's entity linking needs spaCy (`pip install "mem0ai[nlp]"`, which
   downloads a model on first use) and is skipped without it. Mem0's LLM

@@ -1,11 +1,15 @@
 import asyncio
 import copy
+import json
+from datetime import UTC, datetime
 from typing import Any
 
 from mem0 import Memory  # type: ignore[import-untyped]
+from pydantic import BaseModel, Field
 
 from synapse.config import Settings, get_settings
 from synapse.domain.models import SourceEvent
+from synapse.inference.chat import chat_completion, message_content, parse_json_object
 from synapse.inference.keys import with_fallback_key_sync
 from synapse.memory.chunking import chunk_text
 from synapse.memory.sqlite_vec_store import register as register_sqlite_vec
@@ -87,6 +91,31 @@ class FallbackKeyEmbedder(_WithFallbackKey):
 class FallbackKeyLLM(_WithFallbackKey):
     def generate_response(self, *args: Any, **kwargs: Any) -> Any:
         return self._call("generate_response", *args, **kwargs)
+
+
+SUPERSESSION_PROMPT = """You maintain a memory of facts taken from one person's
+conversations. Each NEW fact comes with the EXISTING facts most similar to it. Decide
+which pairs conflict: they cannot both be true now, because one corrects, updates,
+changes or replaces the other (a corrected name, date or detail; a changed plan;
+a move; a new job; a changed preference). Facts that are merely related, add detail,
+or can both be true do not conflict. Do not decide which one is newer.
+Return exactly one JSON object: {"conflicts": [{"new": <id>, "existing": <id>}]},
+listing only conflicting pairs, or {"conflicts": []}. Output JSON only."""
+
+
+class _Conflict(BaseModel):
+    new: int
+    existing: int
+
+
+class _Conflicts(BaseModel):
+    conflicts: list[_Conflict] = Field(default_factory=list)
+
+
+def _said_at(payload: dict[str, Any]) -> datetime:
+    """When a fact was said: its conversation's date, not when it was stored."""
+    value = datetime.fromisoformat(str(payload["occurred_at"]))
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
 
 
 def fact_message(event: SourceEvent) -> str:
@@ -183,8 +212,8 @@ class Mem0EpisodeStore:
 
         Mem0 2.0's extraction only ever adds. It drops a fact it already holds
         word for word, and never edits or deletes a memory, so the source
-        chunks and recall's write-backs are not at risk from it. It also means a
-        fact that stops being true stays: see the README on writer mode.
+        chunks and recall's write-backs are not at risk from it. Retiring a fact
+        that stops being true is ``settle_facts``'s job.
         """
         if not self.writes_facts or not (event.content or "").strip():
             return []
@@ -343,3 +372,181 @@ class Mem0EpisodeStore:
         if not results:
             raise RuntimeError("Mem0 did not return an indexed retrieval memory")
         return str(results[0]["id"])
+
+    async def release_facts(self, fact_ids: list[str]) -> list[str]:
+        """Reinstate the facts that ``fact_ids`` retired; returns their ids.
+
+        Called before those facts are deleted, when their conversation is read
+        again: a fact retired by one that no longer exists would otherwise stay
+        retired with nothing current in its place. The reinstated facts are
+        settled again with the replacements (``settle_facts``), which retires
+        them anew if the conversation still contradicts them.
+        """
+        if not fact_ids:
+            return []
+
+        def _release() -> list[str]:
+            store = self._get_memory().vector_store
+            rows = store.list(
+                filters={"memory_kind": "fact", "superseded_by": {"in": list(fact_ids)}},
+                top_k=None,
+            )[0]
+            released: list[str] = []
+            for row in rows:
+                payload = {
+                    key: value
+                    for key, value in (row.payload or {}).items()
+                    if key not in ("superseded_by", "invalid_at")
+                }
+                store.update(vector_id=row.id, payload={**payload, "status": "active"})
+                released.append(str(row.id))
+            return released
+
+        return await asyncio.to_thread(_release)
+
+    async def settle_facts(self, *, group_id: str, fact_ids: list[str]) -> int:
+        """Retire the current facts that ``fact_ids`` contradict, or the other way round.
+
+        Mem0 only adds, so without this a correction would sit beside the fact
+        it corrects. Each fact is compared with its nearest current facts from
+        other conversations in the group, and one chat call, for all of them at
+        once, names the pairs that cannot both be true. The model judges only
+        the conflict; when each was said decides which one gives way, as in the
+        graph: the older is retired as of the newer, so a conversation imported
+        late cannot retire a fact stated after it — its own fact is the one
+        retired. Retiring keeps the fact, marked ``status: superseded`` with
+        ``invalid_at`` and ``superseded_by``; search reads current facts only.
+
+        Returns how many facts were retired. Raises if the check fails, so the
+        caller can try it again; it is safe to repeat.
+        """
+        if not fact_ids or self.settings.mem0_supersession_candidates == 0:
+            return 0
+        new, existing, pairs = await asyncio.to_thread(
+            self._conflict_candidates, group_id, fact_ids
+        )
+        if not pairs:
+            return 0
+        payload = {
+            "new": [
+                {
+                    "id": index,
+                    "fact": fact["data"],
+                    "said_on": _said_at(fact).date().isoformat(),
+                    "compare_with": sorted(e for n, e in pairs if n == index),
+                }
+                for index, (_, fact) in enumerate(new)
+                if any(n == index for n, _ in pairs)
+            ],
+            "existing": [
+                {"id": index, "fact": fact["data"], "said_on": _said_at(fact).date().isoformat()}
+                for index, (_, fact) in enumerate(existing)
+            ],
+        }
+        body = await chat_completion(
+            self.settings,
+            [
+                {"role": "system", "content": SUPERSESSION_PROMPT},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            max_tokens=40 + 16 * len(pairs),
+            timeout=45,
+        )
+        decided = _Conflicts.model_validate(parse_json_object(message_content(body)))
+        conflicts = {(c.new, c.existing) for c in decided.conflicts} & pairs
+        return await asyncio.to_thread(self._retire_conflicts, new, existing, conflicts)
+
+    def _conflict_candidates(
+        self, group_id: str, fact_ids: list[str]
+    ) -> tuple[
+        list[tuple[str, dict[str, Any]]],
+        list[tuple[str, dict[str, Any]]],
+        set[tuple[int, int]],
+    ]:
+        memory = self._get_memory()
+        store = memory.vector_store
+        new: list[tuple[str, dict[str, Any]]] = []
+        for fact_id in dict.fromkeys(fact_ids):
+            row = store.get(fact_id)
+            fact = row.payload if row is not None else None
+            if (
+                fact
+                and fact.get("memory_kind") == "fact"
+                and fact.get("group_id") == group_id
+                and fact.get("status", "active") == "active"
+                and fact.get("data")
+            ):
+                new.append((str(fact_id), fact))
+        if not new:
+            return [], [], set()
+
+        vectors = memory.embedding_model.embed_batch([fact["data"] for _, fact in new], "search")
+        limit = self.settings.mem0_supersession_candidates
+        threshold = self.settings.mem0_supersession_threshold
+        existing: list[tuple[str, dict[str, Any]]] = []
+        position: dict[str, int] = {}
+        pairs: set[tuple[int, int]] = set()
+        judged: set[frozenset[str]] = set()
+        for index, ((fact_id, fact), vector) in enumerate(zip(new, vectors, strict=True)):
+            hits = store.search(
+                query=fact["data"],
+                vectors=vector,
+                top_k=limit,
+                filters={
+                    "group_id": group_id,
+                    "memory_kind": "fact",
+                    "status": "active",
+                    # A conversation's own facts were extracted together, and
+                    # Mem0 already reconciled them against each other.
+                    "episode_id": {"ne": fact.get("episode_id")},
+                },
+            )
+            for hit in hits:
+                pair = frozenset({fact_id, str(hit.id)})
+                if (hit.score or 0.0) < threshold or pair in judged or not hit.payload:
+                    continue
+                judged.add(pair)
+                if str(hit.id) not in position:
+                    position[str(hit.id)] = len(existing)
+                    existing.append((str(hit.id), hit.payload))
+                pairs.add((index, position[str(hit.id)]))
+        return new, existing, pairs
+
+    def _retire_conflicts(
+        self,
+        new: list[tuple[str, dict[str, Any]]],
+        existing: list[tuple[str, dict[str, Any]]],
+        conflicts: set[tuple[int, int]],
+    ) -> int:
+        store = self._get_memory().vector_store
+        retired = 0
+        for n, e in sorted(conflicts):
+            (new_id, new_fact), (old_id, old_fact) = new[n], existing[e]
+            # Ties go to the fact being settled: it was read later.
+            if _said_at(old_fact) <= _said_at(new_fact):
+                loser, winner, winner_fact = old_id, new_id, new_fact
+            else:
+                loser, winner, winner_fact = new_id, old_id, old_fact
+            row = store.get(loser)
+            if row is None or not row.payload:
+                continue
+            current = row.payload
+            ends = _said_at(winner_fact)
+            if current.get("status", "active") != "active":
+                # Already retired: keep the earliest successor, as the graph does.
+                if "invalid_at" in current and datetime.fromisoformat(
+                    str(current["invalid_at"])
+                ) <= ends:
+                    continue
+            else:
+                retired += 1
+            store.update(
+                vector_id=loser,
+                payload={
+                    **current,
+                    "status": "superseded",
+                    "invalid_at": ends.isoformat(),
+                    "superseded_by": winner,
+                },
+            )
+        return retired

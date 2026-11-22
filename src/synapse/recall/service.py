@@ -216,8 +216,8 @@ class RecallService:
         # Writer-mode facts fold into the same candidate as their episode's
         # chunks. They compete for the same search slots on the same scores, and
         # a candidate ranks by its best hit of either kind. The judge reads the
-        # facts first, each dated by its conversation (a fact is never retired,
-        # so the date is what tells an old one from a new one), then the spans.
+        # facts first, each dated by its conversation, then the spans. Facts a
+        # later one superseded are not searched, so they never get this far.
         matches: dict[str, list[tuple[int, float, str]]] = {}
         facts: dict[str, list[tuple[float, str]]] = {}
         episodes: dict[str, Episode] = {}

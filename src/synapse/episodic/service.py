@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,6 +8,9 @@ from synapse.db.models import Episode, EpisodeKind, IntentObservation
 from synapse.domain.models import EpisodeMemoryStore, FastInterpreter, SourceEvent
 
 logger = logging.getLogger(__name__)
+
+# Fact ids an episode still has to settle against the group's current facts.
+_UNSETTLED = "mem0_facts_unsettled"
 
 
 def _event_from(episode: Episode) -> SourceEvent:
@@ -148,6 +152,7 @@ class SystemOneService:
         session: AsyncSession,
         *,
         missing_only: bool = False,
+        released: Sequence[str] = (),
     ) -> None:
         """Writer mode: add the facts the model reads off the episode, if the store can.
 
@@ -158,23 +163,72 @@ class SystemOneService:
         rewrite can replace them; a failure is recorded and leaves them unset,
         which is what ``missing_only`` callers look for to try again. Failing
         here costs the facts, never the episode or its chunks.
+
+        The new facts, and any ``released`` by a rewrite, are then settled
+        against the group's current facts (:meth:`_settle_facts`).
         """
         if not self._writes_facts or episode.kind != EpisodeKind.SOURCE:
             return
         extract = self.memory_store.extract_facts  # type: ignore[attr-defined]
         if missing_only and "mem0_fact_ids" in (episode.details or {}):
+            await self._settle_facts(episode, group_id, session)
             return
         details = {
             key: value
             for key, value in (episode.details or {}).items()
             if key != "memory_fact_error"
         }
+        pending = [str(i) for i in details.get(_UNSETTLED) or []] + list(released)
         try:
-            ids = await extract(episode_id=str(episode.id), group_id=group_id, event=event)
-            episode.details = {**details, "mem0_fact_ids": [str(i) for i in ids]}
+            ids = [str(i) for i in await extract(
+                episode_id=str(episode.id), group_id=group_id, event=event
+            )]
+            details["mem0_fact_ids"] = ids
+            pending += ids
         except Exception as error:  # noqa: BLE001 — facts are an extra; the episode stands
-            episode.details = {**details, "memory_fact_error": type(error).__name__}
+            details["memory_fact_error"] = type(error).__name__
             logger.warning("extracting facts from episode %s failed: %s", episode.id, error)
+        if pending and self._settles_facts:
+            details[_UNSETTLED] = list(dict.fromkeys(pending))
+        episode.details = details
+        await session.commit()
+        await session.refresh(episode)
+        await self._settle_facts(episode, group_id, session)
+
+    @property
+    def _settles_facts(self) -> bool:
+        return hasattr(self.memory_store, "settle_facts")
+
+    async def _settle_facts(
+        self, episode: Episode, group_id: str, session: AsyncSession
+    ) -> None:
+        """Retire the current facts this episode's facts contradict (or theirs, if older).
+
+        The ids still to check wait on the row (``mem0_facts_unsettled``) until
+        the check succeeds, so a failure — recorded as
+        ``memory_supersession_error`` — costs only the check, and
+        :meth:`reindex_missing` runs it again. The check is safe to repeat.
+        """
+        pending = [str(i) for i in (episode.details or {}).get(_UNSETTLED) or []]
+        if not pending or not self._settles_facts:
+            return
+        details = {
+            key: value
+            for key, value in (episode.details or {}).items()
+            if key not in (_UNSETTLED, "memory_supersession_error")
+        }
+        try:
+            await self.memory_store.settle_facts(  # type: ignore[attr-defined]
+                group_id=group_id, fact_ids=pending
+            )
+            episode.details = details
+        except Exception as error:  # noqa: BLE001 — the facts stand; only the check is lost
+            episode.details = {
+                **details,
+                _UNSETTLED: pending,
+                "memory_supersession_error": type(error).__name__,
+            }
+            logger.warning("settling facts from episode %s failed: %s", episode.id, error)
         await session.commit()
         await session.refresh(episode)
 
@@ -198,7 +252,9 @@ class SystemOneService:
             stale = [episode.mem0_id]
         # Facts read off the old body go too: re-reading the longer one would
         # otherwise add each of them again in slightly different words.
-        stale += [str(i) for i in (episode.details or {}).get("mem0_fact_ids") or []]
+        stale_facts = [str(i) for i in (episode.details or {}).get("mem0_fact_ids") or []]
+        stale += stale_facts
+        released: list[str] = []
 
         episode.content = event.content
         episode.summary = observation.summary
@@ -207,6 +263,8 @@ class SystemOneService:
         episode.details = {
             key: value
             for key, value in {**(episode.details or {}), **(event.metadata or {})}.items()
+            # Pending ids stay: some may be other episodes' facts still to
+            # settle. Ids of facts deleted below are skipped when settled.
             if key != "mem0_fact_ids"
         }
         # Added against the foreign key rather than through
@@ -230,6 +288,12 @@ class SystemOneService:
         )
 
         try:
+            # Facts the old ones retired are reinstated before those go, and
+            # settled again with the new ones; otherwise they would stay retired
+            # by a fact that no longer exists.
+            release = getattr(self.memory_store, "release_facts", None)
+            if release is not None and stale_facts:
+                released = list(await release(stale_facts))
             await self.memory_store.forget_memories(stale)
             await self._index(episode, event, group_id, observation.summary)
         except Exception as error:  # noqa: BLE001 — the body is the durable half
@@ -242,7 +306,7 @@ class SystemOneService:
 
         await session.commit()
         await session.refresh(episode)
-        await self._extract_facts(episode, event, group_id, session)
+        await self._extract_facts(episode, event, group_id, session, released=released)
         logger.info("episode %s updated from a longer source event", episode.id)
 
     async def reindex_missing(
@@ -264,7 +328,9 @@ class SystemOneService:
         In writer mode it also repairs facts: every source episode without
         ``mem0_fact_ids`` — its extraction failed, typically on chat quota while
         the embeddings went through, or it predates writer mode — gets its one
-        extraction call, and ``facts`` counts those that now have them.
+        extraction call, and ``facts`` counts those that now have them. Facts
+        whose supersession check failed are checked again; ``settled`` counts
+        the episodes whose check now succeeded.
         """
         query = (
             select(Episode)
@@ -302,7 +368,31 @@ class SystemOneService:
             )
         if self._writes_facts:
             counts["facts"] = await self._extract_missing_facts(group_id, session, limit=limit)
+            if self._settles_facts:
+                counts["settled"] = await self._settle_missing_facts(
+                    group_id, session, limit=limit
+                )
         return counts
+
+    async def _settle_missing_facts(
+        self, group_id: str, session: AsyncSession, *, limit: int | None
+    ) -> int:
+        query = (
+            select(Episode)
+            .where(
+                Episode.group_id == group_id,
+                Episode.kind == EpisodeKind.SOURCE,
+                func.json_extract(Episode.details, f"$.{_UNSETTLED}").is_not(None),
+            )
+            .order_by(Episode.occurred_at)
+        )
+        if limit is not None:
+            query = query.limit(limit)
+        settled = 0
+        for episode in list((await session.scalars(query)).all()):
+            await self._settle_facts(episode, group_id, session)
+            settled += _UNSETTLED not in (episode.details or {})
+        return settled
 
     async def _extract_missing_facts(
         self, group_id: str, session: AsyncSession, *, limit: int | None
@@ -366,7 +456,13 @@ class SystemOneService:
             episode.details = {
                 key: value
                 for key, value in (episode.details or {}).items()
-                if key not in ("mem0_fact_ids", "memory_fact_error")
+                if key
+                not in (
+                    "mem0_fact_ids",
+                    "memory_fact_error",
+                    _UNSETTLED,
+                    "memory_supersession_error",
+                )
             }
             try:
                 await self._index(

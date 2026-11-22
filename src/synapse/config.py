@@ -162,6 +162,16 @@ class Settings(BaseSettings):
     # the prompt by ten. The related facts it already holds are shown either
     # way. Held in memory, so it starts empty after a restart.
     mem0_fact_context_episodes: int = Field(default=0, ge=0, le=10)
+    # Fact supersession, in writer mode. Mem0 only ever adds facts, so a
+    # correction ("it's Krati, not Kathy") would leave the fact it corrects
+    # current beside it. After each extraction, every new fact is compared with
+    # this many of the group's nearest current facts from other conversations
+    # (at least ``mem0_supersession_threshold`` similar), and one chat call
+    # decides which pairs cannot both be true. The older of each such pair is
+    # retired — kept, marked superseded, and no longer searched. 0 turns the
+    # check off; no call is made when no current fact is similar enough.
+    mem0_supersession_candidates: int = Field(default=3, ge=0, le=10)
+    mem0_supersession_threshold: float = Field(default=0.5, ge=0, le=1)
     # The entity kinds the model may assign when it extracts the graph. The
     # default suits workplace conversations; a host with other material (a
     # personal assistant, say) names its own. A kind the model invents outside

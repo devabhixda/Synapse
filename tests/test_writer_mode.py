@@ -9,6 +9,7 @@ scope and metadata the other two depend on.
 
 import json
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -244,6 +245,11 @@ class ModelServer:
         self.exhausted = exhausted
         self.prompts: list[str] = []
         self.chat_keys: list[str] = []
+        # What each extraction returns, in turn; FACT once they run out.
+        self.facts: list[list[str]] = []
+        # Whether two facts conflict, for the supersession check.
+        self.conflicting: Callable[[str, str], bool] = lambda new, old: False
+        self.judgements: list[dict[str, Any]] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         key = request.headers["authorization"].removeprefix("Bearer ")
@@ -256,10 +262,33 @@ class ModelServer:
             return httpx.Response(
                 200, json={"object": "list", "model": "e", "data": data, "usage": {}}
             )
+        if body["messages"][0]["content"].startswith("You maintain a memory of facts"):
+            return self.judge(json.loads(body["messages"][-1]["content"]))
         self.chat_keys.append(key)
         if key in self.exhausted:
             return httpx.Response(429, json={}, headers={"x-should-retry": "false"})
         self.prompts.append(body["messages"][-1]["content"])
+        facts = self.facts.pop(0) if self.facts else [FACT]
+        return self.reply({"memory": [{"text": text} for text in facts]})
+
+    def judge(self, payload: dict[str, Any]) -> httpx.Response:
+        self.judgements.append(payload)
+        existing = {item["id"]: item["fact"] for item in payload["existing"]}
+        return self.reply(
+            {
+                "conflicts": [
+                    {"new": item["id"], "existing": other}
+                    for item in payload["new"]
+                    for other in item["compare_with"]
+                    if self.conflicting(item["fact"], existing[other])
+                ]
+            }
+        )
+
+    async def handle_async(self, request: httpx.Request) -> httpx.Response:
+        return self.handle(request)
+
+    def reply(self, content: dict[str, Any]) -> httpx.Response:
         return httpx.Response(
             200,
             json={
@@ -271,10 +300,7 @@ class ModelServer:
                     {
                         "index": 0,
                         "finish_reason": "stop",
-                        "message": {
-                            "role": "assistant",
-                            "content": json.dumps({"memory": [{"text": FACT}]}),
-                        },
+                        "message": {"role": "assistant", "content": json.dumps(content)},
                     }
                 ],
             },
@@ -291,6 +317,13 @@ def server(monkeypatch: pytest.MonkeyPatch) -> ModelServer:
         original(self, *args, **{**kwargs, "transport": transport})
 
     monkeypatch.setattr(httpx.Client, "__init__", patched)
+    original_async = httpx.AsyncClient.__init__
+
+    def patched_async(self: httpx.AsyncClient, *args: Any, **kwargs: Any) -> None:
+        transport = httpx.MockTransport(model_server.handle_async)
+        original_async(self, *args, **{**kwargs, "transport": transport})
+
+    monkeypatch.setattr(httpx.AsyncClient, "__init__", patched_async)
     return model_server
 
 
@@ -377,3 +410,231 @@ async def test_reindex_missing_retries_facts_whose_extraction_failed(
     assert counts == {"indexed": 0, "failed": 0, "facts": 1}
     assert again == {"indexed": 0, "failed": 0, "facts": 0}
     assert stored is not None and stored.details["mem0_fact_ids"] == ["fact-1"]
+
+
+# Fact supersession: Mem0 only adds, so a correction has to retire what it corrects.
+
+NOV_20 = datetime(2026, 11, 20, 9, tzinfo=UTC)
+NOV_22 = datetime(2026, 11, 22, 9, tzinfo=UTC)
+KATHY = "Kathy is flying via Singapore from San Francisco on December 26, 2026"
+KRATI = "Krati, not Kathy, is flying via Singapore from San Francisco on December 26, 2026"
+KRATI_AGAIN = "The person flying via Singapore on December 26, 2026 is Krati"
+AISLE = "Abhi prefers aisle seats when booking flights"
+
+
+def flying(new: str, old: str) -> bool:
+    """The two flight facts contradict each other; nothing else does."""
+    return "flying" in new and "flying" in old and ("Krati" in new) != ("Krati" in old)
+
+
+def chat_on(day: datetime, source_id: str, content: str) -> SourceEvent:
+    return SourceEvent(
+        source_id=source_id,
+        source_type=SourceType.WHATSAPP,
+        conversation_id=OWNER,
+        content=content,
+        participants=["Abhi"],
+        occurred_at=day,
+    )
+
+
+def fact_payload(store: Mem0EpisodeStore, fact_id: str) -> dict[str, Any]:
+    row = store._get_memory().vector_store.get(fact_id)
+    assert row is not None
+    payload: dict[str, Any] = row.payload
+    return payload
+
+
+async def current_facts(store: Mem0EpisodeStore) -> list[str]:
+    hits = await store.search("When is Krati flying?", OWNER)
+    return sorted(hit["memory"] for hit in hits if hit["metadata"].get("memory_kind") == "fact")
+
+
+async def learn(
+    store: Mem0EpisodeStore, episode_id: str, day: datetime
+) -> list[str]:
+    ids = await store.extract_facts(
+        episode_id=episode_id, group_id=OWNER, event=chat_on(day, episode_id, "Abhi: flights")
+    )
+    await store.settle_facts(group_id=OWNER, fact_ids=ids)
+    return ids
+
+
+async def test_a_correction_retires_the_fact_it_corrects(
+    server: ModelServer, tmp_path: Path
+) -> None:
+    server.facts, server.conflicting = [[KATHY], [KRATI]], flying
+    store = Mem0EpisodeStore(writer(tmp_path))
+
+    [kathy] = await learn(store, "e1", NOV_20)
+    [krati] = await learn(store, "e2", NOV_22)
+
+    retired = fact_payload(store, kathy)
+    assert retired["status"] == "superseded"
+    assert retired["superseded_by"] == krati
+    assert retired["invalid_at"] == NOV_22.isoformat()
+    assert retired["data"] == KATHY  # kept, not deleted
+    assert fact_payload(store, krati)["status"] == "active"
+    assert await current_facts(store) == [KRATI]
+    # One call for the second episode; the first had nothing to compare with.
+    assert len(server.judgements) == 1
+
+
+async def test_facts_that_can_both_be_true_both_stay(
+    server: ModelServer, tmp_path: Path
+) -> None:
+    server.facts, server.conflicting = [[KATHY], [AISLE]], flying
+    store = Mem0EpisodeStore(writer(tmp_path))
+
+    await learn(store, "e1", NOV_20)
+    await learn(store, "e2", NOV_22)
+
+    assert len(server.judgements) == 1
+    assert await current_facts(store) == sorted([KATHY, AISLE])
+
+
+async def test_an_older_conversation_imported_later_does_not_retire_a_newer_fact(
+    server: ModelServer, tmp_path: Path
+) -> None:
+    server.facts, server.conflicting = [[KRATI], [KATHY]], flying
+    store = Mem0EpisodeStore(writer(tmp_path))
+
+    [krati] = await learn(store, "e2", NOV_22)
+    [kathy] = await learn(store, "e1", NOV_20)
+
+    assert fact_payload(store, krati)["status"] == "active"
+    late = fact_payload(store, kathy)
+    assert (late["status"], late["superseded_by"]) == ("superseded", krati)
+    assert late["invalid_at"] == NOV_22.isoformat()
+    assert await current_facts(store) == [KRATI]
+
+
+async def test_without_candidates_the_check_is_off(server: ModelServer, tmp_path: Path) -> None:
+    server.facts, server.conflicting = [[KATHY], [KRATI]], flying
+    store = Mem0EpisodeStore(writer(tmp_path, mem0_supersession_candidates=0))
+
+    await learn(store, "e1", NOV_20)
+    await learn(store, "e2", NOV_22)
+
+    assert server.judgements == []
+    assert await current_facts(store) == sorted([KATHY, KRATI])
+
+
+class PickingJudge:
+    """Selects the candidate whose text mentions ``word``."""
+
+    def __init__(self, word: str) -> None:
+        self.word = word
+        self.seen: list[dict[str, object]] = []
+
+    async def select(self, query: str, candidates: list[dict[str, object]]) -> EpisodeSelection:
+        self.seen = candidates
+        chosen = next(c for c in candidates if self.word in str(c["text"]))
+        return EpisodeSelection(
+            answerable=True, selected_episode_id=str(chosen["episode_id"]), confidence=0.9
+        )
+
+
+async def test_recall_answers_with_the_correction_through_a_growing_thread(
+    server: ModelServer, tmp_path: Path, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    server.facts, server.conflicting = [[KATHY], [KRATI], [KRATI_AGAIN, AISLE]], flying
+    store = Mem0EpisodeStore(writer(tmp_path))
+    service = SystemOneService(StubInterpreter(), store)
+    first = chat_on(NOV_20, "wa-nov-20", "Abhi: Kathy flies via Singapore on the 26th")
+    correction = "Abhi: sorry, it's Krati not Kathy"
+    async with sessions() as session:
+        older, _ = await service.process(first, OWNER, session)
+        newer, _ = await service.process(
+            chat_on(NOV_22, "wa-nov-22", correction), OWNER, session
+        )
+    [kathy] = older.details["mem0_fact_ids"]
+    [krati] = newer.details["mem0_fact_ids"]
+    assert fact_payload(store, kathy)["superseded_by"] == krati
+
+    judge = PickingJudge("Krati")
+    async with sessions() as session:
+        result = await RecallService(memory_store=store, judge=judge).recall(
+            "When is Krati flying?", OWNER, session
+        )
+    assert result.answer == KRATI
+    assert not any(KATHY in str(candidate["text"]) for candidate in judge.seen)
+
+    # The thread grows: its facts are re-read, and the old ones deleted. The
+    # Kathy fact must not stay retired by a fact that is gone — it is
+    # reinstated and settled against the new reading, which still corrects it.
+    async with sessions() as session:
+        grown, _ = await service.process(
+            chat_on(NOV_22, "wa-nov-22", correction + "\nAbhi: aisle seat please"),
+            OWNER,
+            session,
+        )
+    again, aisle = grown.details["mem0_fact_ids"]
+    assert store._get_memory().vector_store.get(krati) is None
+    assert fact_payload(store, kathy)["superseded_by"] == again
+    assert "mem0_facts_unsettled" not in grown.details
+    assert await current_facts(store) == sorted([KRATI_AGAIN, AISLE])
+
+
+async def test_a_fact_retired_by_a_reading_that_is_gone_is_reinstated(
+    server: ModelServer, tmp_path: Path, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    server.facts, server.conflicting = [[KATHY], [KRATI], [AISLE]], flying
+    store = Mem0EpisodeStore(writer(tmp_path))
+    service = SystemOneService(StubInterpreter(), store)
+    async with sessions() as session:
+        older, _ = await service.process(
+            chat_on(NOV_20, "wa-nov-20", "Abhi: Kathy flies on the 26th"), OWNER, session
+        )
+        await service.process(chat_on(NOV_22, "wa-nov-22", "Abhi: Krati?"), OWNER, session)
+        # Read again, the conversation no longer yields the correction.
+        await service.process(
+            chat_on(NOV_22, "wa-nov-22", "Abhi: Krati?\nAbhi: aisle seat"), OWNER, session
+        )
+    [kathy] = older.details["mem0_fact_ids"]
+
+    reinstated = fact_payload(store, kathy)
+    assert reinstated["status"] == "active"
+    assert "superseded_by" not in reinstated and "invalid_at" not in reinstated
+    assert await current_facts(store) == sorted([KATHY, AISLE])
+
+
+class SettlingStore(FactStore):
+    def __init__(self, sessions: async_sessionmaker[AsyncSession], *, fail: bool) -> None:
+        super().__init__(sessions)
+        self.fail_settling = fail
+        self.settled: list[list[str]] = []
+
+    async def settle_facts(self, *, group_id: str, fact_ids: list[str]) -> int:
+        if self.fail_settling:
+            raise RuntimeError("quota")
+        self.settled.append(fact_ids)
+        return 0
+
+    async def release_facts(self, fact_ids: list[str]) -> list[str]:
+        return []
+
+
+async def test_a_failed_supersession_check_is_recorded_and_retried(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    service = SystemOneService(StubInterpreter(), SettlingStore(sessions, fail=True))
+    async with sessions() as session:
+        episode, _ = await service.process(whatsapp(), OWNER, session)
+
+    assert episode.details["mem0_fact_ids"] == ["fact-1"]
+    assert episode.details["mem0_facts_unsettled"] == ["fact-1"]
+    assert episode.details["memory_supersession_error"] == "RuntimeError"
+
+    working = SettlingStore(sessions, fail=False)
+    service.memory_store = working
+    async with sessions() as session:
+        counts = await service.reindex_missing(OWNER, session)
+        stored = await session.scalar(select(Episode))
+
+    assert counts == {"indexed": 0, "failed": 0, "facts": 0, "settled": 1}
+    assert working.settled == [["fact-1"]]
+    assert working.extracted == []  # the facts were kept; only the check ran again
+    assert stored is not None
+    assert "mem0_facts_unsettled" not in stored.details
+    assert "memory_supersession_error" not in stored.details
