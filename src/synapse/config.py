@@ -103,15 +103,6 @@ class Settings(BaseSettings):
     # hosted endpoint needs a real one.
     chat_api_key: str = ""
     embedding_api_key: str = ""
-    # A second key for the same endpoint, used only when the primary one is out
-    # of quota (HTTP 429 / RESOURCE_EXHAUSTED): a free-tier key first, and a
-    # paid one once it runs dry. After a quota error the primary key is skipped
-    # for ``fallback_key_cooldown`` seconds and then tried again, so a
-    # per-minute limit costs a minute on the fallback rather than the rest of
-    # the day. Unset, a quota error fails the call exactly as before.
-    chat_fallback_api_key: str | None = None
-    embedding_fallback_api_key: str | None = None
-    fallback_key_cooldown: float = Field(default=60, ge=0)
     embedding_dimensions: int = 1536
     # Extra completion budget for models that think before answering. Every
     # call site sizes its own budget for the answer it expects, which is all a

@@ -204,8 +204,6 @@ Settings are read from the environment (or a `.env` file), or passed to
 | `EMBEDDING_BASE_URL` | `http://localhost:8080/v1` | The embedding endpoint |
 | `EMBEDDING_MODEL`, `EMBEDDING_API_KEY` | none | The embedding model, for the vector index |
 | `EMBEDDING_DIMENSIONS` | `1536` | Must match the embedding model |
-| `CHAT_FALLBACK_API_KEY`, `EMBEDDING_FALLBACK_API_KEY` | none | A second key, used only when the first is out of quota |
-| `FALLBACK_KEY_COOLDOWN` | `60` | Seconds to skip a key that ran out of quota before trying it again |
 | `ENTITY_KINDS` | the workplace kinds below | The entity kinds graph extraction may use, as a JSON list in the environment |
 | `RELATIONSHIP_PREDICATES` | the workplace predicates below | The predicates graph extraction may use, and which are single-valued, as JSON |
 | `MEM0_WRITER_MODE` | `false` | Also have Mem0 extract standalone facts from each episode (see below) |
@@ -224,13 +222,6 @@ can run out before answering, so set `CHAT_REASONING_TOKENS` to a few thousand
 for one; it costs nothing on a model that doesn't reason. Such models can also
 take longer than 8 seconds on a long conversation, so raise
 `CHAT_CLASSIFY_TIMEOUT` too.
-
-**Fallback keys.** With `CHAT_FALLBACK_API_KEY` or `EMBEDDING_FALLBACK_API_KEY`
-set, a call refused for quota (HTTP 429, or a `RESOURCE_EXHAUSTED` /
-`insufficient_quota` error) is retried once with the fallback key; any other
-failure is not. The primary key is then skipped for `FALLBACK_KEY_COOLDOWN`
-seconds and tried again after, so a free-tier key is used whenever it has quota
-and a paid one only when it doesn't. Without a fallback key nothing changes.
 
 **Entity kinds.** Extraction may label an entity Person, Team, Company,
 Product, Project, System, Repository, Decision, Task, Blocker or Concept by
@@ -284,8 +275,7 @@ Facts share `MEMORY_SEARCH_TOP_K` with chunks, so consider raising it.
   ten related facts, plus `MEM0_FACT_CONTEXT_EPISODES` earlier episodes), one
   embedding per fact, one batched embedding call for the supersession search,
   and one small chat call to judge conflicts — skipped when no current fact is
-  similar enough — all on the configured models and keys, fallback keys
-  included. A longer
+  similar enough — all on the configured models and keys. A longer
   version of an episode replaces its facts with a fresh extraction.
 - *Corrections retire what they correct.* Mem0 2.0 only adds facts, so after
   each extraction Synapse compares every new fact with the group's nearest

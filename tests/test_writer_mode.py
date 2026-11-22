@@ -241,8 +241,9 @@ async def test_a_fact_alone_cites_the_whole_conversation(
 class ModelServer:
     """Answers chat with one fact and embeddings with a constant vector."""
 
-    def __init__(self, exhausted: frozenset[str] = frozenset()) -> None:
-        self.exhausted = exhausted
+    def __init__(self) -> None:
+        # Gemini's OpenAI-compatible endpoint leaves each embedding's index null.
+        self.null_indices = False
         self.prompts: list[str] = []
         self.chat_keys: list[str] = []
         # What each extraction returns, in turn; FACT once they run out.
@@ -256,7 +257,11 @@ class ModelServer:
         body = json.loads(request.content)
         if request.url.path.endswith("/embeddings"):
             data = [
-                {"object": "embedding", "index": i, "embedding": [0.1] * 8}
+                {
+                    "object": "embedding",
+                    "index": None if self.null_indices else i,
+                    "embedding": [0.1] * 8,
+                }
                 for i in range(len(body["input"]))
             ]
             return httpx.Response(
@@ -265,8 +270,6 @@ class ModelServer:
         if body["messages"][0]["content"].startswith("You maintain a memory of facts"):
             return self.judge(json.loads(body["messages"][-1]["content"]))
         self.chat_keys.append(key)
-        if key in self.exhausted:
-            return httpx.Response(429, json={}, headers={"x-should-retry": "false"})
         self.prompts.append(body["messages"][-1]["content"])
         facts = self.facts.pop(0) if self.facts else [FACT]
         return self.reply({"memory": [{"text": text} for text in facts]})
@@ -372,18 +375,6 @@ async def test_mem0_writes_dated_facts_tagged_with_their_episode(
     assert [hit["memory"] for hit in facts] == [FACT]
     assert facts[0]["metadata"]["episode_id"] == "e1"
     assert facts[0]["metadata"]["source_type"] == "whatsapp"
-
-
-async def test_mem0_fact_extraction_falls_back_to_the_second_key(
-    server: ModelServer, tmp_path: Path
-) -> None:
-    server.exhausted = frozenset({"free"})
-    store = Mem0EpisodeStore(writer(tmp_path, chat_fallback_api_key="paid"))
-
-    ids = await store.extract_facts(episode_id="e1", group_id=OWNER, event=whatsapp())
-
-    assert len(ids) == 1
-    assert server.chat_keys == ["free", "paid"]
 
 
 async def test_without_writer_mode_mem0_is_not_asked(server: ModelServer, tmp_path: Path) -> None:
@@ -638,3 +629,66 @@ async def test_a_failed_supersession_check_is_recorded_and_retried(
     assert stored is not None
     assert "mem0_facts_unsettled" not in stored.details
     assert "memory_supersession_error" not in stored.details
+
+
+async def test_facts_settle_when_the_endpoint_leaves_embedding_indices_null(
+    server: ModelServer, tmp_path: Path, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """Gemini's batch embeddings carry ``index: null``; Mem0 sorted on it.
+
+    Any episode with two or more new facts then failed its check with
+    "'<' not supported between instances of 'NoneType' and 'int'", left its
+    facts unsettled, and ``reindex_missing`` could not recover them.
+    """
+    server.null_indices, server.conflicting = True, flying
+    server.facts = [[KATHY], [KRATI, AISLE]]
+    store = Mem0EpisodeStore(writer(tmp_path))
+    service = SystemOneService(StubInterpreter(), store)
+    async with sessions() as session:
+        older, _ = await service.process(
+            chat_on(NOV_20, "wa-nov-20", "Abhi: Kathy flies on the 26th"), OWNER, session
+        )
+        newer, _ = await service.process(
+            chat_on(NOV_22, "wa-nov-22", "Abhi: it's Krati. Aisle seat."), OWNER, session
+        )
+
+    assert "memory_supersession_error" not in newer.details
+    assert "mem0_facts_unsettled" not in newer.details
+    [kathy] = older.details["mem0_fact_ids"]
+    assert fact_payload(store, kathy)["status"] == "superseded"
+    assert await current_facts(store) == sorted([KRATI, AISLE])
+
+
+async def test_reindex_missing_settles_facts_a_failed_check_left_behind(
+    server: ModelServer, tmp_path: Path, sessions: async_sessionmaker[AsyncSession]
+) -> None:
+    """Episodes stored by the broken release keep ``mem0_facts_unsettled``."""
+    server.conflicting = flying
+    server.facts = [[KATHY], [KRATI, AISLE]]
+    store = Mem0EpisodeStore(writer(tmp_path, mem0_supersession_candidates=0))
+    service = SystemOneService(StubInterpreter(), store)
+    async with sessions() as session:
+        older, _ = await service.process(
+            chat_on(NOV_20, "wa-nov-20", "Abhi: Kathy flies on the 26th"), OWNER, session
+        )
+        newer, _ = await service.process(
+            chat_on(NOV_22, "wa-nov-22", "Abhi: it's Krati. Aisle seat."), OWNER, session
+        )
+        newer.details = {
+            **newer.details,
+            "mem0_facts_unsettled": newer.details["mem0_fact_ids"],
+            "memory_supersession_error": "TypeError",
+        }
+        await session.commit()
+
+    server.null_indices = True
+    store.settings = writer(tmp_path)
+    async with sessions() as session:
+        counts = await service.reindex_missing(OWNER, session)
+        stored = await session.get(Episode, newer.id)
+
+    assert counts["settled"] == 1
+    assert stored is not None and "mem0_facts_unsettled" not in stored.details
+    assert "memory_supersession_error" not in stored.details
+    [kathy] = older.details["mem0_fact_ids"]
+    assert fact_payload(store, kathy)["status"] == "superseded"

@@ -22,18 +22,16 @@ import os
 # that build a real Memory send no telemetry.
 os.environ.setdefault("MEM0_TELEMETRY", "False")
 
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from synapse.db import models  # noqa: F401 — imported so Base.metadata sees every table
 from synapse.db.pragmas import configure_sqlite
 from synapse.db.schema import create_schema
-from synapse.inference.keys import KEY_POOL
 
 
 @pytest_asyncio.fixture
@@ -63,10 +61,3 @@ async def memory_db_path(tmp_path: Path) -> Any:
     """A path for a Mem0 vector store file, isolated per test."""
     return str(tmp_path / "memory.db")
 
-
-@pytest.fixture(autouse=True)
-def _forget_resting_keys() -> Iterator[None]:
-    """Which API keys are out of quota is process-wide; no test inherits another's."""
-    KEY_POOL.clear()
-    yield
-    KEY_POOL.clear()

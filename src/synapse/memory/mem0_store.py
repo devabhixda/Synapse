@@ -1,5 +1,4 @@
 import asyncio
-import copy
 import json
 from datetime import UTC, datetime
 from typing import Any
@@ -10,7 +9,6 @@ from pydantic import BaseModel, Field
 from synapse.config import Settings, get_settings
 from synapse.domain.models import SourceEvent
 from synapse.inference.chat import chat_completion, message_content, parse_json_object
-from synapse.inference.keys import with_fallback_key_sync
 from synapse.memory.chunking import chunk_text
 from synapse.memory.sqlite_vec_store import register as register_sqlite_vec
 
@@ -43,54 +41,46 @@ FACT_INSTRUCTIONS = (
 FACT_RUN_ID = "synapse-facts"
 
 
-class _WithFallbackKey:
-    """One of Mem0's API clients, with a second key for when the first is out of quota.
+class OrderedBatchEmbedder:
+    """Mem0's OpenAI embedder, with a batch call that tolerates a missing ``index``.
 
-    Mem0 builds its embedder and LLM from a single key each and calls them
-    directly, so the fallback has to sit in front of those objects: this one
-    forwards each call to the copy holding whichever key
-    ``synapse.inference.keys`` prefers. The copy differs only in its key, so the
-    model, URL and dimensions stay in step.
+    Mem0 sorts a batch response by each item's ``index``. Gemini's
+    OpenAI-compatible endpoint leaves it null, so any batch of two or more
+    raised ``TypeError`` — failing the supersession check outright, and
+    quietly turning Mem0's own batch into one request per text. The items come
+    back in input order, so that order is used whenever the indices are not
+    all there. Everything else is the wrapped embedder's.
     """
 
-    def __init__(
-        self, primary: Any, *, primary_key: str, fallback_key: str, cooldown: float, purpose: str
-    ) -> None:
-        secondary = copy.copy(primary)
-        secondary.client = primary.client.with_options(api_key=fallback_key)
-        self._primary = primary
-        self._primary_key = primary_key
-        self._fallback_key = fallback_key
-        self._cooldown = cooldown
-        self._purpose = purpose
-        self._by_key = {primary_key: primary, fallback_key: secondary}
-        self.config = primary.config
+    def __init__(self, embedder: Any) -> None:
+        self._embedder = embedder
 
-    def _call(self, method: str, *args: Any, **kwargs: Any) -> Any:
-        return with_fallback_key_sync(
-            self._primary_key,
-            self._fallback_key,
-            lambda key: getattr(self._by_key[key], method)(*args, **kwargs),
-            cooldown=self._cooldown,
-            purpose=self._purpose,
-        )
+    def embed_batch(self, texts: Any, memory_action: Any = "add") -> list[list[float]]:
+        embedder = self._embedder
+        texts = [str(text).replace("\n", " ") for text in texts]
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), _EMBED_BATCH):
+            request: dict[str, Any] = {
+                "input": texts[start : start + _EMBED_BATCH],
+                "model": embedder.config.model,
+                "encoding_format": "float",
+            }
+            if getattr(embedder, "_pass_dimensions_to_api", False):
+                request["dimensions"] = embedder.config.embedding_dims
+            data = list(embedder.client.embeddings.create(**request).data)
+            if all(isinstance(item.index, int) for item in data):
+                data.sort(key=lambda item: item.index)
+            vectors.extend(item.embedding for item in data)
+        if len(vectors) != len(texts):
+            raise ValueError(f"embedding batch returned {len(vectors)} vectors for {len(texts)}")
+        return vectors
 
     def __getattr__(self, name: str) -> Any:
-        # Anything Mem0 reads other than the calls wrapped below.
-        return getattr(self.__dict__["_primary"], name)
+        return getattr(self.__dict__["_embedder"], name)
 
 
-class FallbackKeyEmbedder(_WithFallbackKey):
-    def embed(self, text: Any, memory_action: Any = None) -> Any:
-        return self._call("embed", text, memory_action)
-
-    def embed_batch(self, texts: Any, memory_action: Any = "add") -> Any:
-        return self._call("embed_batch", texts, memory_action)
-
-
-class FallbackKeyLLM(_WithFallbackKey):
-    def generate_response(self, *args: Any, **kwargs: Any) -> Any:
-        return self._call("generate_response", *args, **kwargs)
+# The most texts Mem0 sends in one embedding request.
+_EMBED_BATCH = 100
 
 
 SUPERSESSION_PROMPT = """You maintain a memory of facts taken from one person's
@@ -169,24 +159,7 @@ class Mem0EpisodeStore:
                 }
             )
             memory = self._memory
-            embedding_fallback = settings.embedding_fallback_api_key
-            if embedding_fallback and embedding_fallback != settings.embedding_api_key:
-                memory.embedding_model = FallbackKeyEmbedder(
-                    memory.embedding_model,
-                    primary_key=settings.embedding_api_key,
-                    fallback_key=embedding_fallback,
-                    cooldown=settings.fallback_key_cooldown,
-                    purpose="embedding",
-                )
-            chat_fallback = settings.chat_fallback_api_key
-            if chat_fallback and chat_fallback != settings.chat_api_key:
-                memory.llm = FallbackKeyLLM(
-                    memory.llm,
-                    primary_key=settings.chat_api_key,
-                    fallback_key=chat_fallback,
-                    cooldown=settings.fallback_key_cooldown,
-                    purpose="chat",
-                )
+            memory.embedding_model = OrderedBatchEmbedder(memory.embedding_model)
             # Mem0 asks for ten; see ``Settings.mem0_fact_context_episodes``.
             context = settings.mem0_fact_context_episodes
             last_messages = memory.db.get_last_messages
