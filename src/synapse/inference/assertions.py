@@ -1,11 +1,17 @@
 import json
 import re
+from collections.abc import Sequence
 
 import httpx
 from json_repair import repair_json
 from pydantic import BaseModel, Field, ValidationError
 
-from synapse.config import Settings, get_settings
+from synapse.config import (
+    DEFAULT_ENTITY_KINDS,
+    FALLBACK_ENTITY_KIND,
+    Settings,
+    get_settings,
+)
 from synapse.domain.models import (
     SemanticAssertions,
     SemanticEntityAssertion,
@@ -19,28 +25,24 @@ from synapse.inference.chat import (
     parse_json_object,
 )
 
-SYSTEM_PROMPT = """Extract the single strongest explicit organizational relationship from
+SYSTEM_PROMPT_TEMPLATE = """Extract the single strongest explicit organizational relationship from
 one work conversation. Return exactly one flat JSON object with: supported (boolean),
 subject_kind, subject_name, predicate, object_kind, object_name, confidence. Allowed kinds:
-Person, Team, Company, Product, Project, System, Repository, Decision, Task, Blocker,
-Concept. Use a short snake_case predicate. If no explicit relationship exists, return
+{kinds}. Use a short snake_case predicate. If no explicit relationship exists, return
 supported false and empty strings. Predicate must be one of: owns, assigned_to, blocks,
 resolves, decides, proposes, requests, updates, implements, uses, part_of, affects,
 depends_on, related_to. Do not infer facts or add commentary. Output JSON only."""
 
-ALLOWED_KINDS = {
-    "Person",
-    "Team",
-    "Company",
-    "Product",
-    "Project",
-    "System",
-    "Repository",
-    "Decision",
-    "Task",
-    "Blocker",
-    "Concept",
-}
+# The default kinds, kept under the old name for code that imported it.
+ALLOWED_KINDS = set(DEFAULT_ENTITY_KINDS)
+
+
+def system_prompt(kinds: Sequence[str] = DEFAULT_ENTITY_KINDS) -> str:
+    """The extraction prompt, naming the kinds the model may use."""
+    return SYSTEM_PROMPT_TEMPLATE.format(kinds=", ".join(kinds))
+
+
+SYSTEM_PROMPT = system_prompt()
 
 ALLOWED_PREDICATES = {
     "owns",
@@ -79,7 +81,10 @@ class LLMAssertionInterpreter:
             body = await chat_completion(
                 self.settings,
                 [
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {
+                        "role": "system",
+                        "content": system_prompt(self.settings.entity_kinds),
+                    },
                     {
                         "role": "user",
                         "content": (
@@ -127,8 +132,9 @@ class LLMAssertionInterpreter:
             raise InferenceError(
                 f"Semantic assertion extraction returned incomplete data for {event.source_id}"
             )
-        subject_kind = normalize_kind(assertion.subject_kind)
-        object_kind = normalize_kind(assertion.object_kind)
+        kinds = self.settings.entity_kinds
+        subject_kind = normalize_kind(assertion.subject_kind, kinds)
+        object_kind = normalize_kind(assertion.object_kind, kinds)
         predicate = normalize_predicate(assertion.predicate)
         return SemanticAssertions(
             entities=[
@@ -156,9 +162,17 @@ class LLMAssertionInterpreter:
         )
 
 
-def normalize_kind(value: str) -> str:
-    normalized = value.strip().title()
-    return normalized if normalized in ALLOWED_KINDS else "Concept"
+def normalize_kind(value: str, kinds: Sequence[str] = DEFAULT_ENTITY_KINDS) -> str:
+    """The configured spelling of ``value``'s kind, or ``Concept`` if it has none.
+
+    Matched without regard to case or spacing, since the model's capitalisation
+    is not something to depend on.
+    """
+    wanted = " ".join(value.split()).casefold()
+    return next(
+        (kind for kind in kinds if " ".join(kind.split()).casefold() == wanted),
+        FALLBACK_ENTITY_KIND,
+    )
 
 
 def normalize_predicate(value: str) -> str:

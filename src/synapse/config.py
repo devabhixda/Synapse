@@ -13,9 +13,27 @@ leaving embeddings to a second deployment with its own URL, key, and dimension.
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
+
+# The kind an extracted entity gets when the model names one outside the
+# configured list; always allowed, whatever the list.
+FALLBACK_ENTITY_KIND = "Concept"
+
+DEFAULT_ENTITY_KINDS: tuple[str, ...] = (
+    "Person",
+    "Team",
+    "Company",
+    "Product",
+    "Project",
+    "System",
+    "Repository",
+    "Decision",
+    "Task",
+    "Blocker",
+    "Concept",
+)
 
 
 def sqlite_path(database_url: str) -> str:
@@ -47,6 +65,15 @@ class Settings(BaseSettings):
     # hosted endpoint needs a real one.
     chat_api_key: str = ""
     embedding_api_key: str = ""
+    # A second key for the same endpoint, used only when the primary one is out
+    # of quota (HTTP 429 / RESOURCE_EXHAUSTED): a free-tier key first, and a
+    # paid one once it runs dry. After a quota error the primary key is skipped
+    # for ``fallback_key_cooldown`` seconds and then tried again, so a
+    # per-minute limit costs a minute on the fallback rather than the rest of
+    # the day. Unset, a quota error fails the call exactly as before.
+    chat_fallback_api_key: str | None = None
+    embedding_fallback_api_key: str | None = None
+    fallback_key_cooldown: float = Field(default=60, ge=0)
     embedding_dimensions: int = 1536
     # Extra completion budget for models that think before answering. Every
     # call site sizes its own budget for the answer it expects, which is all a
@@ -82,6 +109,29 @@ class Settings(BaseSettings):
     # slots, so this is deliberately larger than the number of distinct episodes
     # a query is expected to need.
     memory_search_top_k: int = Field(default=20, ge=1)
+    # The entity kinds the model may assign when it extracts the graph. The
+    # default suits workplace conversations; a host with other material (a
+    # personal assistant, say) names its own. A kind the model invents outside
+    # this list is stored as ``Concept``, which is therefore always allowed.
+    entity_kinds: list[str] = Field(default_factory=lambda: list(DEFAULT_ENTITY_KINDS))
+
+    @field_validator("entity_kinds")
+    @classmethod
+    def _normalize_entity_kinds(cls, kinds: list[str]) -> list[str]:
+        # Kinds match case-insensitively, so two spellings of one kind would
+        # split its entities across two keys; keep the first, and spell the
+        # fallback kind exactly as the rest of the code expects it.
+        unique: dict[str, str] = {}
+        for kind in kinds:
+            cleaned = " ".join(kind.split())
+            if not cleaned:
+                raise ValueError("entity kinds must be non-empty")
+            folded = cleaned.casefold()
+            if folded == FALLBACK_ENTITY_KIND.casefold():
+                cleaned = FALLBACK_ENTITY_KIND
+            unique.setdefault(folded, cleaned)
+        unique.setdefault(FALLBACK_ENTITY_KIND.casefold(), FALLBACK_ENTITY_KIND)
+        return list(unique.values())
 
     @property
     def mem0_database_url(self) -> str:

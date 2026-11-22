@@ -25,13 +25,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from synapse.config import Settings, sqlite_path
 from synapse.db import models
 from synapse.db.base import Base
 from synapse.db.pragmas import configure_sqlite
+from synapse.db.schema import create_schema
 from synapse.memory.sqlite_vec_store import SqliteVecStore
 
 WRITES = 100
@@ -256,3 +257,48 @@ async def test_the_vector_store_can_write_while_a_transaction_is_open(
     assert store.col_info()["count"] == 1
     # A shared file would have blocked here for the full 5s busy timeout.
     assert waited < 1.0
+
+
+async def test_a_database_from_before_whatsapp_and_call_stores_them(tmp_path: Path) -> None:
+    """0.2.5 sized ``source_type`` as VARCHAR(7); ``whatsapp`` is eight characters.
+
+    Nothing needs migrating — the column carries no CHECK constraint and SQLite
+    ignores the length — and this pins that, on a table declared the old way.
+    """
+    path = tmp_path / "old.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    configure_sqlite(engine)
+    async with engine.begin() as conn:
+        await conn.run_sync(create_schema)
+    with sqlite3.connect(path) as db:
+        (ddl,) = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'episodes'"
+        ).fetchone()
+        assert "source_type VARCHAR(8)" in ddl and "CHECK" not in ddl
+        db.execute("DROP TABLE episodes")
+        db.execute(ddl.replace("source_type VARCHAR(8)", "source_type VARCHAR(7)"))
+
+    async with engine.begin() as conn:
+        assert await conn.run_sync(create_schema) == []
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as session:
+        for source_type in (models.SourceType.WHATSAPP, models.SourceType.CALL):
+            session.add(
+                models.Episode(
+                    group_id="owner",
+                    kind=models.EpisodeKind.SOURCE,
+                    source_type=source_type,
+                    source_id=f"{source_type}-1",
+                    content="Dinner with Asha at 8 on Friday.",
+                    participants=["Asha"],
+                    details={},
+                    occurred_at=datetime.now(UTC),
+                )
+            )
+        await session.commit()
+    async with sessions() as session:
+        query = select(models.Episode.source_type).order_by(models.Episode.source_id)
+        stored = (await session.scalars(query)).all()
+    await engine.dispose()
+
+    assert stored == [models.SourceType.CALL, models.SourceType.WHATSAPP]

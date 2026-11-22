@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from synapse.config import Settings, get_settings
 from synapse.domain.models import FastObservation, SourceEvent, semantic_assertions
+from synapse.inference.keys import with_fallback_key
 
 logger = logging.getLogger(__name__)
 
@@ -79,20 +80,34 @@ async def chat_completion(
 
     Returns the raw response body; callers pull the message content out
     themselves because they disagree about what a malformed one means.
+
+    A quota error on ``chat_api_key`` is retried once with
+    ``chat_fallback_api_key`` when one is set; see ``synapse.inference.keys``.
     """
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(
-            f"{settings.chat_base_url.rstrip('/')}/chat/completions",
-            json={
-                "model": settings.chat_model,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens + settings.chat_reasoning_tokens,
-                "response_format": {"type": "json_object"},
-            },
-            headers={"Authorization": f"Bearer {settings.chat_api_key}"},
+
+        async def post(api_key: str) -> httpx.Response:
+            response = await client.post(
+                f"{settings.chat_base_url.rstrip('/')}/chat/completions",
+                json={
+                    "model": settings.chat_model,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens + settings.chat_reasoning_tokens,
+                    "response_format": {"type": "json_object"},
+                },
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            response.raise_for_status()
+            return response
+
+        response = await with_fallback_key(
+            settings.chat_api_key,
+            settings.chat_fallback_api_key,
+            post,
+            cooldown=settings.fallback_key_cooldown,
+            purpose="chat",
         )
-        response.raise_for_status()
     body: dict[str, Any] = response.json()
     return body
 

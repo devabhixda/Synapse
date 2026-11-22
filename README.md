@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Teams rarely lack information; they lose it in thousands of messages. Synapse
-reads conversations (Slack threads, meetings) and keeps them as memory an agent
+reads conversations (Slack threads, meetings, chats, calls) and keeps them as memory an agent
 can search and cite: every answer points back to the conversation it came from,
 and facts that change are retired instead of piling up.
 
@@ -113,6 +113,10 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+`source_type` records where a conversation came from: `SLACK`, `MEETING`,
+`WHATSAPP` or `CALL` (`RECALL` marks the answers recall writes back). Databases
+made by earlier releases accept the newer values without a migration.
+
 `process` is idempotent on `source_id`: storing the same conversation again
 costs nothing, and a longer version of it (a thread that got replies) replaces
 the stored one and its vectors. Build the graph from stored episodes with
@@ -200,6 +204,9 @@ Settings are read from the environment (or a `.env` file), or passed to
 | `EMBEDDING_BASE_URL` | `http://localhost:8080/v1` | The embedding endpoint |
 | `EMBEDDING_MODEL`, `EMBEDDING_API_KEY` | none | The embedding model, for the vector index |
 | `EMBEDDING_DIMENSIONS` | `1536` | Must match the embedding model |
+| `CHAT_FALLBACK_API_KEY`, `EMBEDDING_FALLBACK_API_KEY` | none | A second key, used only when the first is out of quota |
+| `FALLBACK_KEY_COOLDOWN` | `60` | Seconds to skip a key that ran out of quota before trying it again |
+| `ENTITY_KINDS` | the workplace kinds below | The entity kinds graph extraction may use, as a JSON list in the environment |
 | `MEM0_COLLECTION` | `synapse_episodes` | The index's collection name; one per embedding model |
 | `MEMORY_HIT_THRESHOLD` | `0.62` | How close an episode must be to answer from it |
 | `INFERENCE_MODE` | `auto` | `fake` gives deterministic labels with no model, for tests |
@@ -211,6 +218,22 @@ can run out before answering, so set `CHAT_REASONING_TOKENS` to a few thousand
 for one; it costs nothing on a model that doesn't reason. Such models can also
 take longer than 8 seconds on a long conversation, so raise
 `CHAT_CLASSIFY_TIMEOUT` too.
+
+**Fallback keys.** With `CHAT_FALLBACK_API_KEY` or `EMBEDDING_FALLBACK_API_KEY`
+set, a call refused for quota (HTTP 429, or a `RESOURCE_EXHAUSTED` /
+`insufficient_quota` error) is retried once with the fallback key; any other
+failure is not. The primary key is then skipped for `FALLBACK_KEY_COOLDOWN`
+seconds and tried again after, so a free-tier key is used whenever it has quota
+and a paid one only when it doesn't. Without a fallback key nothing changes.
+
+**Entity kinds.** Extraction may label an entity Person, Team, Company,
+Product, Project, System, Repository, Decision, Task, Blocker or Concept by
+default. Material that isn't about work wants other kinds; pass your own, e.g.
+`Settings(entity_kinds=["Person", "Place", "Event", "Organization",
+"Preference", "Task", "Concept"])` or
+`ENTITY_KINDS='["Person","Place","Event"]'`. The extraction prompt names
+exactly these, matching is case-insensitive, and anything else the model
+returns is stored as `Concept`, which is always included.
 
 **Changing the embedding model** invalidates the index, since vectors from two
 models can't be compared. Use a new `MEM0_COLLECTION` and re-index.

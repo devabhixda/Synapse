@@ -17,9 +17,9 @@ def _event_from(episode: Episode) -> SourceEvent:
     the row.
     """
     return SourceEvent(
-        source_id=episode.source_id,
+        source_id=episode.source_id or "",
         source_type=episode.source_type,
-        conversation_id=episode.conversation_id,
+        conversation_id=episode.conversation_id or "",
         content=episode.content,
         participants=list(episode.participants or []),
         occurred_at=episode.occurred_at,

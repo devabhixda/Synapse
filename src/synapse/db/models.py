@@ -102,9 +102,19 @@ class EpisodeKind(StrEnum):
 
 
 class SourceType(StrEnum):
+    """Where an episode came from.
+
+    Stored as plain text with no CHECK constraint (SQLAlchemy's ``Enum`` does
+    not emit one by default, and SQLite ignores the VARCHAR length), so a new
+    member needs no migration: a database created by an older release accepts
+    it as is.
+    """
+
     SLACK = "slack"
     MEETING = "meeting"
     RECALL = "recall"
+    WHATSAPP = "whatsapp"
+    CALL = "call"
 
 
 episode_kind_enum = Enum(

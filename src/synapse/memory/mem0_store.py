@@ -1,10 +1,12 @@
 import asyncio
+import copy
 from typing import Any
 
 from mem0 import Memory  # type: ignore[import-untyped]
 
 from synapse.config import Settings, get_settings
 from synapse.domain.models import SourceEvent
+from synapse.inference.keys import with_fallback_key_sync
 from synapse.memory.chunking import chunk_text
 from synapse.memory.sqlite_vec_store import register as register_sqlite_vec
 
@@ -15,6 +17,44 @@ register_sqlite_vec()
 # than spinning; at 100 memories a page this covers far more than any real
 # account holds.
 _MAX_PURGE_PAGES = 500
+
+
+class FallbackKeyEmbedder:
+    """Mem0's OpenAI embedder, with a second key for when the first is out of quota.
+
+    Mem0 builds its embedder from a single key and calls ``embed`` and
+    ``embed_batch`` on it directly, so the fallback has to sit in front of that
+    object: this one forwards each call to the embedder holding whichever key
+    ``synapse.inference.keys`` prefers. The second embedder is a copy of the
+    first with only the key changed, so model, URL and dimensions stay in step.
+    """
+
+    def __init__(self, primary: Any, settings: Settings, fallback_api_key: str) -> None:
+        secondary = copy.copy(primary)
+        secondary.client = primary.client.with_options(api_key=fallback_api_key)
+        self._primary_key = settings.embedding_api_key
+        self._fallback_key = fallback_api_key
+        self._cooldown = settings.fallback_key_cooldown
+        self._embedders = {self._primary_key: primary, fallback_api_key: secondary}
+        self.config = primary.config
+
+    def embed(self, text: Any, memory_action: Any = None) -> Any:
+        return with_fallback_key_sync(
+            self._primary_key,
+            self._fallback_key,
+            lambda key: self._embedders[key].embed(text, memory_action),
+            cooldown=self._cooldown,
+            purpose="embedding",
+        )
+
+    def embed_batch(self, texts: Any, memory_action: Any = "add") -> Any:
+        return with_fallback_key_sync(
+            self._primary_key,
+            self._fallback_key,
+            lambda key: self._embedders[key].embed_batch(texts, memory_action),
+            cooldown=self._cooldown,
+            purpose="embedding",
+        )
 
 
 class Mem0EpisodeStore:
@@ -56,6 +96,11 @@ class Mem0EpisodeStore:
                     },
                 }
             )
+            fallback = settings.embedding_fallback_api_key
+            if fallback and fallback != settings.embedding_api_key:
+                self._memory.embedding_model = FallbackKeyEmbedder(
+                    self._memory.embedding_model, settings, fallback
+                )
         return self._memory
 
     async def add_episode(

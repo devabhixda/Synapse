@@ -1,11 +1,12 @@
 import json
 import re
+from collections.abc import Sequence
 from typing import Protocol
 
 import httpx
 from pydantic import ValidationError
 
-from synapse.config import Settings, get_settings
+from synapse.config import DEFAULT_ENTITY_KINDS, Settings, get_settings
 from synapse.consolidation.extractor import (
     derive_semantic_plan,
     entity_key,
@@ -20,6 +21,7 @@ from synapse.consolidation.models import (
     RelationshipSpec,
 )
 from synapse.db.models import Episode
+from synapse.inference.assertions import normalize_kind
 from synapse.inference.chat import (
     InferenceError,
     chat_completion,
@@ -27,19 +29,9 @@ from synapse.inference.chat import (
     parse_json_object,
 )
 
-ALLOWED_ENTITY_KINDS = {
-    "Person",
-    "Team",
-    "Company",
-    "Product",
-    "Project",
-    "System",
-    "Repository",
-    "Decision",
-    "Task",
-    "Blocker",
-    "Concept",
-}
+# The default kinds, kept under the old name for code that imported it. The
+# kinds actually allowed are ``Settings.entity_kinds``.
+ALLOWED_ENTITY_KINDS = set(DEFAULT_ENTITY_KINDS)
 
 SYSTEM_PROMPT = """You are Synapse System 2 resolving entity aliases during overnight
 memory consolidation. Review candidate aliases against source episode excerpts. Return
@@ -151,15 +143,15 @@ def normalize_predicate(value: str) -> str:
 
 
 def normalize_raw_plan(
-    raw_plan: RawConsolidationPlan, episodes: list[Episode]
+    raw_plan: RawConsolidationPlan,
+    episodes: list[Episode],
+    kinds: Sequence[str] = DEFAULT_ENTITY_KINDS,
 ) -> ConsolidationPlan:
     valid_source_ids = {episode.source_id for episode in episodes if episode.source_id}
     entities: dict[str, EntitySpec] = {}
 
     for raw_entity in raw_plan.entities:
-        kind = raw_entity.kind.strip().title()
-        if kind not in ALLOWED_ENTITY_KINDS:
-            kind = "Concept"
+        kind = normalize_kind(raw_entity.kind, kinds)
         name = " ".join(raw_entity.canonical_name.split())
         if not name:
             continue
@@ -188,8 +180,10 @@ def normalize_raw_plan(
 
     relationships: dict[tuple[str, str, str], RelationshipSpec] = {}
     for raw_relationship in raw_plan.relationships:
-        subject_kind = raw_relationship.subject_kind.strip().title()
-        object_kind = raw_relationship.object_kind.strip().title()
+        # Normalized the same way as the entities, or a relationship naming a
+        # kind in different case would miss the entity it refers to.
+        subject_kind = normalize_kind(raw_relationship.subject_kind, kinds)
+        object_kind = normalize_kind(raw_relationship.object_kind, kinds)
         subject_key = entity_key(subject_kind, raw_relationship.subject_name)
         object_key = entity_key(object_kind, raw_relationship.object_name)
         if subject_key not in entities or object_key not in entities:
