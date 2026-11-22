@@ -143,8 +143,8 @@ episode.
 
 Relationships hold over a period. Each gets `valid_at` from the conversation
 that asserted it, and `invalid_at` stays empty while it is current. Predicates
-that admit one answer at a time, like a task's assignee or a service's owner,
-close the previous edge when a new one is asserted; predicates that accumulate
+that admit one answer at a time, like a task's assignee or a service's owner
+(configurable, see `RELATIONSHIP_PREDICATES`), close the previous edge when a new one is asserted; predicates that accumulate
 (`mentions`, `depends_on`, `blocks`) never close that way. Order comes from the
 conversations, not import order, so importing an old export cannot retire a
 newer fact. Reads return current edges by default.
@@ -207,6 +207,7 @@ Settings are read from the environment (or a `.env` file), or passed to
 | `CHAT_FALLBACK_API_KEY`, `EMBEDDING_FALLBACK_API_KEY` | none | A second key, used only when the first is out of quota |
 | `FALLBACK_KEY_COOLDOWN` | `60` | Seconds to skip a key that ran out of quota before trying it again |
 | `ENTITY_KINDS` | the workplace kinds below | The entity kinds graph extraction may use, as a JSON list in the environment |
+| `RELATIONSHIP_PREDICATES` | the workplace predicates below | The predicates graph extraction may use, and which are single-valued, as JSON |
 | `MEM0_WRITER_MODE` | `false` | Also have Mem0 extract standalone facts from each episode (see below) |
 | `MEM0_FACT_INSTRUCTIONS` | none | Extra guidance for that extraction |
 | `MEM0_FACT_CONTEXT_EPISODES` | `0` | Earlier episodes the extraction sees in full, up to 10 |
@@ -237,6 +238,33 @@ default. Material that isn't about work wants other kinds; pass your own, e.g.
 `ENTITY_KINDS='["Person","Place","Event"]'`. The extraction prompt names
 exactly these, matching is case-insensitive, and anything else the model
 returns is stored as `Concept`, which is always included.
+
+**Relationship predicates.** By default extraction may use owns, assigned_to,
+blocks, resolves, decides, proposes, requests, updates, implements, uses,
+part_of, affects, depends_on and related_to. Each predicate also says how many
+current edges it admits, which is what drives supersession (below):
+`one_per_subject` (a new assertion closes the subject's previous edge: a person
+`lives_in` one place at a time; by default `assigned_to`), `one_per_object`
+(closes the object's previous edge: a thing has one owner; by default `owns`)
+or `many` (edges accumulate). Pass your own as a mapping, or as a list when all
+of them accumulate:
+
+```python
+Settings(relationship_predicates={
+    "lives_in": "one_per_subject", "works_at": "one_per_subject",
+    "likes": "many", "dislikes": "many", "prefers": "many",
+    "attending": "many", "scheduled_for": "many", "knows": "many",
+})
+# RELATIONSHIP_PREDICATES='{"lives_in": "one_per_subject", "likes": "many"}'
+```
+
+The extraction prompt names exactly these; predicates are snake-cased before
+matching, and anything else becomes `related_to`, which is always included and
+always `many`. `ConsolidationService`, `apply_plan` and `review_relationship`
+read the single-valued ones from the settings they are given (pass
+`settings=` to the latter two), unless an explicit `functional=` overrides them.
+Build a new `Settings(...)` to change these; `model_copy(update=...)` skips the
+normalization.
 
 **Writer mode.** By default Mem0 is only the vector index: each episode is
 stored as verbatim chunks and no model reads it beyond System 1's label. With

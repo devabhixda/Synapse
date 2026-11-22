@@ -1,9 +1,10 @@
 import pytest
 from pydantic import ValidationError
 
-from synapse.config import DEFAULT_ENTITY_KINDS, Settings
+from synapse.config import DEFAULT_ENTITY_KINDS, DEFAULT_RELATIONSHIP_PREDICATES, Settings
 from synapse.inference.assertions import normalize_kind, normalize_predicate, system_prompt
 
+PERSONAL_PREDICATES = ["lives_in", "works_at", "likes", "attending", "related_to"]
 PERSONAL_KINDS = ["Person", "Place", "Event", "Organization", "Preference", "Task", "Concept"]
 
 
@@ -54,3 +55,52 @@ def test_assertion_predicates_map_to_stable_ontology() -> None:
     assert normalize_predicate("fix bug") == "resolves"
     assert normalize_predicate("develop-dashboard") == "implements"
     assert normalize_predicate("unexpected relation") == "related_to"
+
+
+def test_configured_predicates_replace_the_workplace_ones() -> None:
+    assert normalize_predicate("Lives In", PERSONAL_PREDICATES) == "lives_in"
+    # A workplace synonym maps only onto a predicate that is configured.
+    assert normalize_predicate("owner of", PERSONAL_PREDICATES) == "related_to"
+    assert normalize_predicate("owner of") == "owns"
+
+
+def test_predicates_default_to_the_workplace_set() -> None:
+    assert Settings().relationship_predicates == DEFAULT_RELATIONSHIP_PREDICATES
+
+
+def test_a_predicate_list_accumulates_and_related_to_is_always_there() -> None:
+    settings = Settings(relationship_predicates=["Likes", "knows"])
+
+    assert settings.relationship_predicates == {
+        "likes": "many",
+        "knows": "many",
+        "related_to": "many",
+    }
+    with pytest.raises(ValidationError):
+        Settings(relationship_predicates={"related_to": "one_per_subject"})
+    with pytest.raises(ValidationError):
+        Settings(relationship_predicates={"lives_in": "sometimes"})
+
+
+def test_predicates_are_read_from_the_environment_as_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "RELATIONSHIP_PREDICATES", '{"lives_in": "one_per_subject", "likes": "many"}'
+    )
+    assert Settings().relationship_predicates == {
+        "lives_in": "one_per_subject",
+        "likes": "many",
+        "related_to": "many",
+    }
+    monkeypatch.setenv("RELATIONSHIP_PREDICATES", '["likes", "knows"]')
+    assert set(Settings().relationship_predicates) == {"likes", "knows", "related_to"}
+
+
+def test_the_prompt_names_the_configured_predicates() -> None:
+    prompt = system_prompt(PERSONAL_KINDS, PERSONAL_PREDICATES)
+
+    assert "Predicate must be one of: lives_in, works_at, likes, attending, related_to." in prompt
+    assert "assigned_to" not in prompt
+    assert "work conversation" not in prompt
+    assert "organizational relationship from\none work conversation" in system_prompt()

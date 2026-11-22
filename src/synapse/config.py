@@ -10,8 +10,10 @@ same service. A gateway that serves chat may serve no embedding model at all,
 leaving embeddings to a second deployment with its own URL, key, and dimension.
 """
 
+import re
 from functools import lru_cache
 from pathlib import Path
+from typing import Any, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -34,6 +36,42 @@ DEFAULT_ENTITY_KINDS: tuple[str, ...] = (
     "Blocker",
     "Concept",
 )
+
+type PredicateCardinality = Literal["many", "one_per_subject", "one_per_object"]
+"""How many current edges a relationship predicate admits.
+
+``many``: edges accumulate, and asserting one closes nothing (a person likes
+many things). ``one_per_subject``: a subject has one current object, so a new
+assertion closes the subject's previous edge (a person lives in one place at a
+time). ``one_per_object``: an object has one current subject (a thing has one
+owner at a time; ``owns`` points from owner to thing).
+"""
+
+# The predicate an extracted relationship gets when the model names one outside
+# the configured set; always allowed, and always ``many``, because it absorbs
+# unrelated relationships that must not retire one another.
+FALLBACK_PREDICATE = "related_to"
+
+DEFAULT_RELATIONSHIP_PREDICATES: dict[str, PredicateCardinality] = {
+    "owns": "one_per_object",
+    "assigned_to": "one_per_subject",
+    "blocks": "many",
+    "resolves": "many",
+    "decides": "many",
+    "proposes": "many",
+    "requests": "many",
+    "updates": "many",
+    "implements": "many",
+    "uses": "many",
+    "part_of": "many",
+    "affects": "many",
+    "depends_on": "many",
+    "related_to": "many",
+}
+
+
+def snake_case(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
 
 
 def sqlite_path(database_url: str) -> str:
@@ -129,6 +167,15 @@ class Settings(BaseSettings):
     # personal assistant, say) names its own. A kind the model invents outside
     # this list is stored as ``Concept``, which is therefore always allowed.
     entity_kinds: list[str] = Field(default_factory=lambda: list(DEFAULT_ENTITY_KINDS))
+    # The relationship predicates extraction may use, and how many current
+    # edges each admits, which is what decides supersession (see
+    # ``PredicateCardinality``). A list means every predicate accumulates. In
+    # the environment, JSON: '{"lives_in": "one_per_subject", "likes": "many"}'.
+    # A predicate the model invents outside this set is stored as
+    # ``related_to``, which is therefore always present and always ``many``.
+    relationship_predicates: dict[str, PredicateCardinality] = Field(
+        default_factory=lambda: dict(DEFAULT_RELATIONSHIP_PREDICATES)
+    )
 
     @field_validator("entity_kinds")
     @classmethod
@@ -147,6 +194,32 @@ class Settings(BaseSettings):
             unique.setdefault(folded, cleaned)
         unique.setdefault(FALLBACK_ENTITY_KIND.casefold(), FALLBACK_ENTITY_KIND)
         return list(unique.values())
+
+    @field_validator("relationship_predicates", mode="before")
+    @classmethod
+    def _predicates_from_list(cls, value: Any) -> Any:
+        if isinstance(value, list | tuple | set | frozenset):
+            return {str(predicate): "many" for predicate in value}
+        return value
+
+    @field_validator("relationship_predicates")
+    @classmethod
+    def _normalize_predicates(
+        cls, predicates: dict[str, PredicateCardinality]
+    ) -> dict[str, PredicateCardinality]:
+        normalized: dict[str, PredicateCardinality] = {}
+        for predicate, cardinality in predicates.items():
+            name = snake_case(predicate)
+            if not name:
+                raise ValueError(f"relationship predicate {predicate!r} is empty once normalized")
+            if normalized.get(name, cardinality) != cardinality:
+                raise ValueError(f"relationship predicate {name!r} is given two cardinalities")
+            normalized[name] = cardinality
+        if normalized.setdefault(FALLBACK_PREDICATE, "many") != "many":
+            raise ValueError(
+                f"{FALLBACK_PREDICATE!r} catches every unknown predicate, so it must be 'many'"
+            )
+        return normalized
 
     @property
     def mem0_database_url(self) -> str:
