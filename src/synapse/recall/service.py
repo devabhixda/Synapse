@@ -56,6 +56,20 @@ def citation_excerpt(episode: Episode, memory: dict[str, Any]) -> str | None:
     return matched_text(episode, memory)
 
 
+def answer_text(episode: Episode, memory: dict[str, Any]) -> str:
+    """The answer recall returns for a selected candidate.
+
+    The judge reads a writer-mode candidate as its facts followed by the chunks
+    they came from, but the facts are the answer: the transcript behind them is
+    supporting evidence, and it stays in the citation. A candidate with no
+    facts answers with its matched chunks, as before writer mode.
+    """
+    facts = memory.get("facts")
+    if isinstance(facts, list) and any(isinstance(f, str) and f.strip() for f in facts):
+        return "\n".join(f for f in facts if isinstance(f, str) and f.strip())
+    return matched_text(episode, memory)
+
+
 def needs_substantive_update(query: str) -> bool:
     normalized = normalize_query(query)
     if any(phrase in normalized for phrase in ("who asked", "who requested")):
@@ -108,7 +122,7 @@ class RecallService:
                 episode, memory = selected
                 result = RecallResult(
                     query=query,
-                    answer=matched_text(episode, memory),
+                    answer=answer_text(episode, memory),
                     answer_origin="episodic",
                     citations=episode_citations(episode, citation_excerpt(episode, memory)),
                     selected_ids=[str(episode.id)],
@@ -261,6 +275,11 @@ class RecallService:
                     if text.strip()
                 ]
                 folded_memory["memory"] = "\n".join([*lines, *spans])
+                folded_memory["facts"] = [
+                    text
+                    for _, text in sorted(fact_hits, key=lambda hit: hit[0], reverse=True)
+                    if text.strip()
+                ]
                 folded_memory["excerpt"] = "\n".join(spans)
                 folded_memory["metadata"]["fact_matches"] = len(fact_hits)
             folded.append((episode, folded_memory))

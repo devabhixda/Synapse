@@ -273,8 +273,9 @@ after the episode is committed, the chat model reads it with the group's
 related facts and writes new standalone ones ("Asha is moving to Pune in March
 2027"), embedded and tagged `memory_kind: fact` with the episode's id. Recall
 folds a fact hit into its episode's candidate: the judge reads the matching
-facts, dated by their conversation, before the matching chunks, and the
-citation quotes the chunks (or the whole conversation), never the paraphrase.
+facts, dated by their conversation, before the matching chunks. When it picks
+that episode, `answer` is the matching facts alone and the citation quotes the
+chunks (or the whole conversation), never the paraphrase.
 Facts share `MEMORY_SEARCH_TOP_K` with chunks, so consider raising it.
 
 - *Cost:* one chat call per episode (input: the conversation, up to ten related

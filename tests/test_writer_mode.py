@@ -208,6 +208,8 @@ async def test_recall_reads_facts_with_their_date_and_cites_the_conversation(
     )
     assert result.score_details["memory_score"] == 0.9
     assert result.score_details["fact_matches"] == 1
+    # The answer is the fact alone; the transcript it came from is the citation.
+    assert result.answer == FACT
     # The paraphrase is never presented as a quotation.
     assert result.citations[0].excerpt == "Asha: moving to Pune"
 
@@ -231,7 +233,7 @@ async def test_a_fact_alone_cites_the_whole_conversation(
         "when is Asha moving?", OWNER, session
     )
 
-    assert result.answer is not None and FACT in result.answer
+    assert result.answer == FACT
     assert result.citations[0].excerpt == THREAD
 
 
