@@ -207,6 +207,9 @@ Settings are read from the environment (or a `.env` file), or passed to
 | `CHAT_FALLBACK_API_KEY`, `EMBEDDING_FALLBACK_API_KEY` | none | A second key, used only when the first is out of quota |
 | `FALLBACK_KEY_COOLDOWN` | `60` | Seconds to skip a key that ran out of quota before trying it again |
 | `ENTITY_KINDS` | the workplace kinds below | The entity kinds graph extraction may use, as a JSON list in the environment |
+| `MEM0_WRITER_MODE` | `false` | Also have Mem0 extract standalone facts from each episode (see below) |
+| `MEM0_FACT_INSTRUCTIONS` | none | Extra guidance for that extraction |
+| `MEM0_FACT_CONTEXT_EPISODES` | `0` | Earlier episodes the extraction sees in full, up to 10 |
 | `MEM0_COLLECTION` | `synapse_episodes` | The index's collection name; one per embedding model |
 | `MEMORY_HIT_THRESHOLD` | `0.62` | How close an episode must be to answer from it |
 | `INFERENCE_MODE` | `auto` | `fake` gives deterministic labels with no model, for tests |
@@ -234,6 +237,34 @@ default. Material that isn't about work wants other kinds; pass your own, e.g.
 `ENTITY_KINDS='["Person","Place","Event"]'`. The extraction prompt names
 exactly these, matching is case-insensitive, and anything else the model
 returns is stored as `Concept`, which is always included.
+
+**Writer mode.** By default Mem0 is only the vector index: each episode is
+stored as verbatim chunks and no model reads it beyond System 1's label. With
+`MEM0_WRITER_MODE=true`, Mem0's own write path also runs (`add(infer=True)`):
+after the episode is committed, the chat model reads it with the group's
+related facts and writes new standalone ones ("Asha is moving to Pune in March
+2027"), embedded and tagged `memory_kind: fact` with the episode's id. Recall
+folds a fact hit into its episode's candidate: the judge reads the matching
+facts, dated by their conversation, before the matching chunks, and the
+citation quotes the chunks (or the whole conversation), never the paraphrase.
+Facts share `MEMORY_SEARCH_TOP_K` with chunks, so consider raising it.
+
+- *Cost:* one chat call per episode (input: the conversation, up to ten related
+  facts, plus `MEM0_FACT_CONTEXT_EPISODES` earlier episodes) and one embedding
+  per fact, on the configured models and keys, fallback keys included. A longer
+  version of an episode replaces its facts with a fresh extraction.
+- *Facts only accumulate.* Mem0 2.0 adds facts and drops exact repeats; it never
+  edits or deletes one, so it cannot touch chunks or recall's write-backs, but a
+  fact that stops being true stays alongside its successor. That is why the
+  judge sees each fact's date. The graph, which closes old facts rather than
+  keeping both, remains the record of what is true now.
+- *Repair and backfill:* extraction runs after the episode is saved and a
+  failure costs only the facts; `reindex_missing` retries any source episode
+  that has none (including ones stored before writer mode), and
+  `reindex_group` drops every vector and rebuilds, facts included.
+- Mem0's entity linking needs spaCy (`pip install "mem0ai[nlp]"`, which
+  downloads a model on first use) and is skipped without it. Mem0's LLM
+  reranker is not used: it makes one chat call per search result.
 
 **Changing the embedding model** invalidates the index, since vectors from two
 models can't be compared. Use a new `MEM0_COLLECTION` and re-index.

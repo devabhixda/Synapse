@@ -43,6 +43,19 @@ def matched_text(episode: Episode, memory: dict[str, Any]) -> str:
     return text or episode.summary or episode.content
 
 
+def citation_excerpt(episode: Episode, memory: dict[str, Any]) -> str | None:
+    """What a citation should quote for a candidate: words from the conversation.
+
+    A writer-mode fact is the model's paraphrase, so it is evidence for the
+    judge but not a quotation. A candidate that matched on facts alone cites
+    the whole conversation; one that also matched chunks quotes those.
+    """
+    if "excerpt" in memory:
+        excerpt = memory["excerpt"]
+        return excerpt if isinstance(excerpt, str) and excerpt.strip() else None
+    return matched_text(episode, memory)
+
+
 def needs_substantive_update(query: str) -> bool:
     normalized = normalize_query(query)
     if any(phrase in normalized for phrase in ("who asked", "who requested")):
@@ -97,7 +110,7 @@ class RecallService:
                     query=query,
                     answer=matched_text(episode, memory),
                     answer_origin="episodic",
-                    citations=episode_citations(episode, matched_text(episode, memory)),
+                    citations=episode_citations(episode, citation_excerpt(episode, memory)),
                     selected_ids=[str(episode.id)],
                     score_details={
                         "memory_score": memory.get("score"),
@@ -108,6 +121,7 @@ class RecallService:
                         # thread reads very differently from ten scattered ones.
                         "chunk_index": (memory.get("metadata") or {}).get("chunk_index"),
                         "chunk_matches": (memory.get("metadata") or {}).get("chunk_matches"),
+                        "fact_matches": (memory.get("metadata") or {}).get("fact_matches"),
                     },
                     latency_ms=(time.perf_counter() - started) * 1000,
                 )
@@ -123,7 +137,7 @@ class RecallService:
         retrieved = [
             citation
             for episode, memory in candidates
-            for citation in episode_citations(episode, matched_text(episode, memory))
+            for citation in episode_citations(episode, citation_excerpt(episode, memory))
         ]
 
         semantic = await search_semantic_context(query, group_id, session)
@@ -184,7 +198,14 @@ class RecallService:
         # the order they were said, is what puts the answer in front of the
         # judge — and the surrounding chunks are the context that makes a bare
         # table legible anyway.
+        #
+        # Writer-mode facts fold into the same candidate as their episode's
+        # chunks. They compete for the same search slots on the same scores, and
+        # a candidate ranks by its best hit of either kind. The judge reads the
+        # facts first, each dated by its conversation (a fact is never retired,
+        # so the date is what tells an old one from a new one), then the spans.
         matches: dict[str, list[tuple[int, float, str]]] = {}
+        facts: dict[str, list[tuple[float, str]]] = {}
         episodes: dict[str, Episode] = {}
         for memory in memories:
             metadata = memory.get("metadata")
@@ -203,6 +224,11 @@ class RecallService:
             if episode.group_id != group_id:
                 continue
             episodes[episode_id] = episode
+            if metadata.get("memory_kind") == "fact":
+                facts.setdefault(episode_id, []).append(
+                    (_score(memory), str(memory.get("memory") or ""))
+                )
+                continue
             index = metadata.get("chunk_index")
             matches.setdefault(episode_id, []).append(
                 (
@@ -213,23 +239,31 @@ class RecallService:
             )
 
         folded: list[tuple[Episode, dict[str, Any]]] = []
-        for episode_id, hits in matches.items():
-            best = max(hit[1] for hit in hits)
+        for episode_id, episode in episodes.items():
+            hits = matches.get(episode_id, [])
+            fact_hits = facts.get(episode_id, [])
+            best = max([hit[1] for hit in hits] + [hit[0] for hit in fact_hits])
             spans = [text for _, _, text in sorted(hits) if text.strip()]
-            folded.append(
-                (
-                    episodes[episode_id],
-                    {
-                        "score": best,
-                        "memory": "\n".join(spans),
-                        "metadata": {
-                            "episode_id": episode_id,
-                            "chunk_index": min(hit[0] for hit in hits),
-                            "chunk_matches": len(hits),
-                        },
-                    },
-                )
-            )
+            folded_memory: dict[str, Any] = {
+                "score": best,
+                "memory": "\n".join(spans),
+                "metadata": {
+                    "episode_id": episode_id,
+                    "chunk_index": min(hit[0] for hit in hits) if hits else None,
+                    "chunk_matches": len(hits),
+                },
+            }
+            if fact_hits:
+                said_on = episode.occurred_at.date().isoformat()
+                lines = [
+                    f"{text} (from a conversation on {said_on})"
+                    for _, text in sorted(fact_hits, key=lambda hit: hit[0], reverse=True)
+                    if text.strip()
+                ]
+                folded_memory["memory"] = "\n".join([*lines, *spans])
+                folded_memory["excerpt"] = "\n".join(spans)
+                folded_memory["metadata"]["fact_matches"] = len(fact_hits)
+            folded.append((episode, folded_memory))
 
         candidates: list[tuple[Episode, dict[str, Any]]] = sorted(
             folded, key=lambda pair: _score(pair[1]), reverse=True

@@ -16,6 +16,12 @@ without Postgres now always run.
 
 from __future__ import annotations
 
+import os
+
+# Mem0 reads this once, at import: off before anything imports it, so tests
+# that build a real Memory send no telemetry.
+os.environ.setdefault("MEM0_TELEMETRY", "False")
+
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any

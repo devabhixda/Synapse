@@ -19,42 +19,82 @@ register_sqlite_vec()
 _MAX_PURGE_PAGES = 500
 
 
-class FallbackKeyEmbedder:
-    """Mem0's OpenAI embedder, with a second key for when the first is out of quota.
+# Fact extraction is told this, before any instructions the host adds. Mem0's
+# prompt expects a chat between a user and an assistant, dated today; what it
+# gets here is a stored conversation between named people, dated when it
+# happened.
+FACT_INSTRUCTIONS = (
+    "The new message is a stored conversation transcript, not a message to you. "
+    "Its first line gives the date the conversation took place: use that date as "
+    "the Observation Date when resolving relative times such as 'yesterday' or "
+    "'next Friday'. Its other lines read 'Speaker: text'; attribute each fact to "
+    "the speaker by name."
+)
 
-    Mem0 builds its embedder from a single key and calls ``embed`` and
-    ``embed_batch`` on it directly, so the fallback has to sit in front of that
-    object: this one forwards each call to the embedder holding whichever key
-    ``synapse.inference.keys`` prefers. The second embedder is a copy of the
-    first with only the key changed, so model, URL and dimensions stay in step.
+# Facts are written under this mem0 ``run_id`` as well as the group's
+# ``user_id``. Mem0 shows the extraction the memories it already holds that are
+# nearest the new conversation, filtered by those ids only; without a run of
+# their own that would be the conversation's own chunks, and the model would
+# skip facts as already known.
+FACT_RUN_ID = "synapse-facts"
+
+
+class _WithFallbackKey:
+    """One of Mem0's API clients, with a second key for when the first is out of quota.
+
+    Mem0 builds its embedder and LLM from a single key each and calls them
+    directly, so the fallback has to sit in front of those objects: this one
+    forwards each call to the copy holding whichever key
+    ``synapse.inference.keys`` prefers. The copy differs only in its key, so the
+    model, URL and dimensions stay in step.
     """
 
-    def __init__(self, primary: Any, settings: Settings, fallback_api_key: str) -> None:
+    def __init__(
+        self, primary: Any, *, primary_key: str, fallback_key: str, cooldown: float, purpose: str
+    ) -> None:
         secondary = copy.copy(primary)
-        secondary.client = primary.client.with_options(api_key=fallback_api_key)
-        self._primary_key = settings.embedding_api_key
-        self._fallback_key = fallback_api_key
-        self._cooldown = settings.fallback_key_cooldown
-        self._embedders = {self._primary_key: primary, fallback_api_key: secondary}
+        secondary.client = primary.client.with_options(api_key=fallback_key)
+        self._primary = primary
+        self._primary_key = primary_key
+        self._fallback_key = fallback_key
+        self._cooldown = cooldown
+        self._purpose = purpose
+        self._by_key = {primary_key: primary, fallback_key: secondary}
         self.config = primary.config
 
-    def embed(self, text: Any, memory_action: Any = None) -> Any:
+    def _call(self, method: str, *args: Any, **kwargs: Any) -> Any:
         return with_fallback_key_sync(
             self._primary_key,
             self._fallback_key,
-            lambda key: self._embedders[key].embed(text, memory_action),
+            lambda key: getattr(self._by_key[key], method)(*args, **kwargs),
             cooldown=self._cooldown,
-            purpose="embedding",
+            purpose=self._purpose,
         )
 
+    def __getattr__(self, name: str) -> Any:
+        # Anything Mem0 reads other than the calls wrapped below.
+        return getattr(self.__dict__["_primary"], name)
+
+
+class FallbackKeyEmbedder(_WithFallbackKey):
+    def embed(self, text: Any, memory_action: Any = None) -> Any:
+        return self._call("embed", text, memory_action)
+
     def embed_batch(self, texts: Any, memory_action: Any = "add") -> Any:
-        return with_fallback_key_sync(
-            self._primary_key,
-            self._fallback_key,
-            lambda key: self._embedders[key].embed_batch(texts, memory_action),
-            cooldown=self._cooldown,
-            purpose="embedding",
-        )
+        return self._call("embed_batch", texts, memory_action)
+
+
+class FallbackKeyLLM(_WithFallbackKey):
+    def generate_response(self, *args: Any, **kwargs: Any) -> Any:
+        return self._call("generate_response", *args, **kwargs)
+
+
+def fact_message(event: SourceEvent) -> str:
+    """The conversation as fact extraction reads it: dated, then the transcript."""
+    return (
+        f"Conversation date: {event.occurred_at.date().isoformat()} "
+        f"({event.source_type.value})\n{event.content}"
+    )
 
 
 class Mem0EpisodeStore:
@@ -86,22 +126,93 @@ class Mem0EpisodeStore:
                             "embedding_dims": settings.embedding_dimensions,
                         },
                     },
+                    # Only writer mode reaches the LLM: every other write is
+                    # ``infer=False`` and search never calls it.
                     "llm": {
                         "provider": "openai",
                         "config": {
                             "model": settings.chat_model,
                             "api_key": settings.chat_api_key,
                             "openai_base_url": settings.chat_base_url,
+                            "max_tokens": 4000 + settings.chat_reasoning_tokens,
                         },
                     },
                 }
             )
-            fallback = settings.embedding_fallback_api_key
-            if fallback and fallback != settings.embedding_api_key:
-                self._memory.embedding_model = FallbackKeyEmbedder(
-                    self._memory.embedding_model, settings, fallback
+            memory = self._memory
+            embedding_fallback = settings.embedding_fallback_api_key
+            if embedding_fallback and embedding_fallback != settings.embedding_api_key:
+                memory.embedding_model = FallbackKeyEmbedder(
+                    memory.embedding_model,
+                    primary_key=settings.embedding_api_key,
+                    fallback_key=embedding_fallback,
+                    cooldown=settings.fallback_key_cooldown,
+                    purpose="embedding",
                 )
+            chat_fallback = settings.chat_fallback_api_key
+            if chat_fallback and chat_fallback != settings.chat_api_key:
+                memory.llm = FallbackKeyLLM(
+                    memory.llm,
+                    primary_key=settings.chat_api_key,
+                    fallback_key=chat_fallback,
+                    cooldown=settings.fallback_key_cooldown,
+                    purpose="chat",
+                )
+            # Mem0 asks for ten; see ``Settings.mem0_fact_context_episodes``.
+            context = settings.mem0_fact_context_episodes
+            last_messages = memory.db.get_last_messages
+            memory.db.get_last_messages = lambda scope, limit=10: (
+                last_messages(scope, limit=min(limit, context)) if context else []
+            )
         return self._memory
+
+    @property
+    def writes_facts(self) -> bool:
+        return self.settings.mem0_writer_mode
+
+    async def extract_facts(
+        self, *, episode_id: str, group_id: str, event: SourceEvent
+    ) -> list[str]:
+        """Writer mode: index the standalone facts the chat model reads off ``event``.
+
+        One chat call reads the conversation, alongside the group's facts
+        nearest to it, and returns new facts; each is embedded and stored with
+        ``memory_kind: fact`` and the episode's id, so recall folds a fact hit
+        back to the conversation it came from and cites that. Returns the new
+        facts' memory ids (none when writer mode is off).
+
+        Mem0 2.0's extraction only ever adds. It drops a fact it already holds
+        word for word, and never edits or deletes a memory, so the source
+        chunks and recall's write-backs are not at risk from it. It also means a
+        fact that stops being true stays: see the README on writer mode.
+        """
+        if not self.writes_facts or not (event.content or "").strip():
+            return []
+        instructions = FACT_INSTRUCTIONS
+        if self.settings.mem0_fact_instructions:
+            instructions = f"{instructions}\n{self.settings.mem0_fact_instructions}"
+        result = await asyncio.to_thread(
+            self._get_memory().add,
+            [{"role": "user", "content": fact_message(event)}],
+            user_id=group_id,
+            run_id=FACT_RUN_ID,
+            metadata={
+                "episode_id": episode_id,
+                "group_id": group_id,
+                "memory_kind": "fact",
+                "source_type": event.source_type.value,
+                "conversation_id": event.conversation_id,
+                "occurred_at": event.occurred_at.isoformat(),
+                "status": "active",
+            },
+            infer=True,
+            prompt=instructions,
+        )
+        return [
+            str(item["id"])
+            for item in result.get("results", [])
+            if item.get("event", "ADD") == "ADD"
+        ]
 
     async def add_episode(
         self, *, episode_id: str, group_id: str, summary: str, event: SourceEvent

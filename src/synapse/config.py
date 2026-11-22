@@ -109,6 +109,21 @@ class Settings(BaseSettings):
     # slots, so this is deliberately larger than the number of distinct episodes
     # a query is expected to need.
     memory_search_top_k: int = Field(default=20, ge=1)
+    # Writer mode: besides indexing each episode's chunks verbatim, have Mem0
+    # extract standalone facts from it with the chat model ("Asha moved to Pune
+    # in March 2026") and index those too, tagged ``memory_kind: fact``. Off by
+    # default; it costs one extra chat call and a few embeddings per episode.
+    # See ``Mem0EpisodeStore.extract_facts``.
+    mem0_writer_mode: bool = False
+    # Extra guidance for that extraction, added after Synapse's own (which
+    # explains that the input is a dated transcript). Mem0 gives it the highest
+    # priority, e.g. "Ignore small talk; keep plans, preferences and contacts."
+    mem0_fact_instructions: str | None = None
+    # How many earlier episodes the extraction sees as context. Mem0 would show
+    # the last ten; for Synapse each is a whole conversation, so that multiplies
+    # the prompt by ten. The related facts it already holds are shown either
+    # way. Held in memory, so it starts empty after a restart.
+    mem0_fact_context_episodes: int = Field(default=0, ge=0, le=10)
     # The entity kinds the model may assign when it extracts the graph. The
     # default suits workplace conversations; a host with other material (a
     # personal assistant, say) names its own. A kind the model invents outside

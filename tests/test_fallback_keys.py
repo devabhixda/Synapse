@@ -163,10 +163,6 @@ def test_the_primary_key_is_tried_again_after_the_cooldown() -> None:
 async def test_embeddings_fall_back_to_the_second_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    import mem0.memory.main as mem0_main  # type: ignore[import-untyped]
-
-    monkeypatch.setattr(mem0_main, "MEM0_TELEMETRY", False)
-    monkeypatch.setattr(mem0_main, "capture_event", lambda *args, **kwargs: None)
     server = QuotaServer(exhausted={FREE})
     original = httpx.Client.__init__
 
