@@ -10,12 +10,68 @@ same service. A gateway that serves chat may serve no embedding model at all,
 leaving embeddings to a second deployment with its own URL, key, and dimension.
 """
 
+import re
 from functools import lru_cache
 from pathlib import Path
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
+
+# The kind an extracted entity gets when the model names one outside the
+# configured list; always allowed, whatever the list.
+FALLBACK_ENTITY_KIND = "Concept"
+
+DEFAULT_ENTITY_KINDS: tuple[str, ...] = (
+    "Person",
+    "Team",
+    "Company",
+    "Product",
+    "Project",
+    "System",
+    "Repository",
+    "Decision",
+    "Task",
+    "Blocker",
+    "Concept",
+)
+
+type PredicateCardinality = Literal["many", "one_per_subject", "one_per_object"]
+"""How many current edges a relationship predicate admits.
+
+``many``: edges accumulate, and asserting one closes nothing (a person likes
+many things). ``one_per_subject``: a subject has one current object, so a new
+assertion closes the subject's previous edge (a person lives in one place at a
+time). ``one_per_object``: an object has one current subject (a thing has one
+owner at a time; ``owns`` points from owner to thing).
+"""
+
+# The predicate an extracted relationship gets when the model names one outside
+# the configured set; always allowed, and always ``many``, because it absorbs
+# unrelated relationships that must not retire one another.
+FALLBACK_PREDICATE = "related_to"
+
+DEFAULT_RELATIONSHIP_PREDICATES: dict[str, PredicateCardinality] = {
+    "owns": "one_per_object",
+    "assigned_to": "one_per_subject",
+    "blocks": "many",
+    "resolves": "many",
+    "decides": "many",
+    "proposes": "many",
+    "requests": "many",
+    "updates": "many",
+    "implements": "many",
+    "uses": "many",
+    "part_of": "many",
+    "affects": "many",
+    "depends_on": "many",
+    "related_to": "many",
+}
+
+
+def snake_case(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
 
 
 def sqlite_path(database_url: str) -> str:
@@ -82,6 +138,89 @@ class Settings(BaseSettings):
     # slots, so this is deliberately larger than the number of distinct episodes
     # a query is expected to need.
     memory_search_top_k: int = Field(default=20, ge=1)
+    # Writer mode: besides indexing each episode's chunks verbatim, have Mem0
+    # extract standalone facts from it with the chat model ("Asha moved to Pune
+    # in March 2026") and index those too, tagged ``memory_kind: fact``. Off by
+    # default; it costs one extra chat call and a few embeddings per episode.
+    # See ``Mem0EpisodeStore.extract_facts``.
+    mem0_writer_mode: bool = False
+    # Extra guidance for that extraction, added after Synapse's own (which
+    # explains that the input is a dated transcript). Mem0 gives it the highest
+    # priority, e.g. "Ignore small talk; keep plans, preferences and contacts."
+    mem0_fact_instructions: str | None = None
+    # How many earlier episodes the extraction sees as context. Mem0 would show
+    # the last ten; for Synapse each is a whole conversation, so that multiplies
+    # the prompt by ten. The related facts it already holds are shown either
+    # way. Held in memory, so it starts empty after a restart.
+    mem0_fact_context_episodes: int = Field(default=0, ge=0, le=10)
+    # Fact supersession, in writer mode. Mem0 only ever adds facts, so a
+    # correction ("it's Krati, not Kathy") would leave the fact it corrects
+    # current beside it. After each extraction, every new fact is compared with
+    # this many of the group's nearest current facts from other conversations
+    # (at least ``mem0_supersession_threshold`` similar), and one chat call
+    # decides which pairs cannot both be true. The older of each such pair is
+    # retired — kept, marked superseded, and no longer searched. 0 turns the
+    # check off; no call is made when no current fact is similar enough.
+    mem0_supersession_candidates: int = Field(default=3, ge=0, le=10)
+    mem0_supersession_threshold: float = Field(default=0.5, ge=0, le=1)
+    # The entity kinds the model may assign when it extracts the graph. The
+    # default suits workplace conversations; a host with other material (a
+    # personal assistant, say) names its own. A kind the model invents outside
+    # this list is stored as ``Concept``, which is therefore always allowed.
+    entity_kinds: list[str] = Field(default_factory=lambda: list(DEFAULT_ENTITY_KINDS))
+    # The relationship predicates extraction may use, and how many current
+    # edges each admits, which is what decides supersession (see
+    # ``PredicateCardinality``). A list means every predicate accumulates. In
+    # the environment, JSON: '{"lives_in": "one_per_subject", "likes": "many"}'.
+    # A predicate the model invents outside this set is stored as
+    # ``related_to``, which is therefore always present and always ``many``.
+    relationship_predicates: dict[str, PredicateCardinality] = Field(
+        default_factory=lambda: dict(DEFAULT_RELATIONSHIP_PREDICATES)
+    )
+
+    @field_validator("entity_kinds")
+    @classmethod
+    def _normalize_entity_kinds(cls, kinds: list[str]) -> list[str]:
+        # Kinds match case-insensitively, so two spellings of one kind would
+        # split its entities across two keys; keep the first, and spell the
+        # fallback kind exactly as the rest of the code expects it.
+        unique: dict[str, str] = {}
+        for kind in kinds:
+            cleaned = " ".join(kind.split())
+            if not cleaned:
+                raise ValueError("entity kinds must be non-empty")
+            folded = cleaned.casefold()
+            if folded == FALLBACK_ENTITY_KIND.casefold():
+                cleaned = FALLBACK_ENTITY_KIND
+            unique.setdefault(folded, cleaned)
+        unique.setdefault(FALLBACK_ENTITY_KIND.casefold(), FALLBACK_ENTITY_KIND)
+        return list(unique.values())
+
+    @field_validator("relationship_predicates", mode="before")
+    @classmethod
+    def _predicates_from_list(cls, value: Any) -> Any:
+        if isinstance(value, list | tuple | set | frozenset):
+            return {str(predicate): "many" for predicate in value}
+        return value
+
+    @field_validator("relationship_predicates")
+    @classmethod
+    def _normalize_predicates(
+        cls, predicates: dict[str, PredicateCardinality]
+    ) -> dict[str, PredicateCardinality]:
+        normalized: dict[str, PredicateCardinality] = {}
+        for predicate, cardinality in predicates.items():
+            name = snake_case(predicate)
+            if not name:
+                raise ValueError(f"relationship predicate {predicate!r} is empty once normalized")
+            if normalized.get(name, cardinality) != cardinality:
+                raise ValueError(f"relationship predicate {name!r} is given two cardinalities")
+            normalized[name] = cardinality
+        if normalized.setdefault(FALLBACK_PREDICATE, "many") != "many":
+            raise ValueError(
+                f"{FALLBACK_PREDICATE!r} catches every unknown predicate, so it must be 'many'"
+            )
+        return normalized
 
     @property
     def mem0_database_url(self) -> str:

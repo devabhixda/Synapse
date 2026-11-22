@@ -152,3 +152,25 @@ async def test_alias_adjudication_uses_the_same_endpoint(recorder: Recorder) -> 
 def test_embeddings_are_configured_apart_from_chat() -> None:
     assert REMOTE.embedding_base_url != REMOTE.chat_base_url
     assert REMOTE.embedding_api_key != REMOTE.chat_api_key
+
+
+async def test_assertion_extraction_uses_the_configured_kinds(recorder: Recorder) -> None:
+    recorder.content = (
+        '{"supported":true,"subject_kind":"person","subject_name":"Asha",'
+        '"predicate":"Likes","object_kind":"PLACE","object_name":"Olive Bistro",'
+        '"confidence":0.9}'
+    )
+    settings = Settings(
+        **REMOTE.model_dump(exclude={"entity_kinds", "relationship_predicates"}),
+        entity_kinds=["Person", "Place", "Event", "Concept"],
+        relationship_predicates={"lives_in": "one_per_subject", "likes": "many"},
+    )
+
+    assertions = await LLMAssertionInterpreter(settings).extract(event())
+
+    assert recorder.request is not None
+    prompt = json.loads(recorder.request.content)["messages"][0]["content"]
+    assert "Allowed kinds:\nPerson, Place, Event, Concept." in prompt
+    assert "Predicate must be one of: lives_in, likes, related_to." in prompt
+    assert [entity.kind for entity in assertions.entities] == ["Person", "Place"]
+    assert assertions.relationships[0].predicate == "likes"

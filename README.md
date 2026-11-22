@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Teams rarely lack information; they lose it in thousands of messages. Synapse
-reads conversations (Slack threads, meetings) and keeps them as memory an agent
+reads conversations (Slack threads, meetings, chats, calls) and keeps them as memory an agent
 can search and cite: every answer points back to the conversation it came from,
 and facts that change are retired instead of piling up.
 
@@ -113,6 +113,10 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+`source_type` records where a conversation came from: `SLACK`, `MEETING`,
+`WHATSAPP`, `CALL` or `GEMINI` (Gemini app chats) (`RECALL` marks the answers recall writes back). Databases
+made by earlier releases accept the newer values without a migration.
+
 `process` is idempotent on `source_id`: storing the same conversation again
 costs nothing, and a longer version of it (a thread that got replies) replaces
 the stored one and its vectors. Build the graph from stored episodes with
@@ -139,8 +143,8 @@ episode.
 
 Relationships hold over a period. Each gets `valid_at` from the conversation
 that asserted it, and `invalid_at` stays empty while it is current. Predicates
-that admit one answer at a time, like a task's assignee or a service's owner,
-close the previous edge when a new one is asserted; predicates that accumulate
+that admit one answer at a time, like a task's assignee or a service's owner
+(configurable, see `RELATIONSHIP_PREDICATES`), close the previous edge when a new one is asserted; predicates that accumulate
 (`mentions`, `depends_on`, `blocks`) never close that way. Order comes from the
 conversations, not import order, so importing an old export cannot retire a
 newer fact. Reads return current edges by default.
@@ -200,6 +204,13 @@ Settings are read from the environment (or a `.env` file), or passed to
 | `EMBEDDING_BASE_URL` | `http://localhost:8080/v1` | The embedding endpoint |
 | `EMBEDDING_MODEL`, `EMBEDDING_API_KEY` | none | The embedding model, for the vector index |
 | `EMBEDDING_DIMENSIONS` | `1536` | Must match the embedding model |
+| `ENTITY_KINDS` | the workplace kinds below | The entity kinds graph extraction may use, as a JSON list in the environment |
+| `RELATIONSHIP_PREDICATES` | the workplace predicates below | The predicates graph extraction may use, and which are single-valued, as JSON |
+| `MEM0_WRITER_MODE` | `false` | Also have Mem0 extract standalone facts from each episode (see below) |
+| `MEM0_FACT_INSTRUCTIONS` | none | Extra guidance for that extraction |
+| `MEM0_FACT_CONTEXT_EPISODES` | `0` | Earlier episodes the extraction sees in full, up to 10 |
+| `MEM0_SUPERSESSION_CANDIDATES` | `3` | Current facts each new fact is checked against for conflicts; `0` turns the check off |
+| `MEM0_SUPERSESSION_THRESHOLD` | `0.5` | How similar a current fact must be to be checked |
 | `MEM0_COLLECTION` | `synapse_episodes` | The index's collection name; one per embedding model |
 | `MEMORY_HIT_THRESHOLD` | `0.62` | How close an episode must be to answer from it |
 | `INFERENCE_MODE` | `auto` | `fake` gives deterministic labels with no model, for tests |
@@ -211,6 +222,82 @@ can run out before answering, so set `CHAT_REASONING_TOKENS` to a few thousand
 for one; it costs nothing on a model that doesn't reason. Such models can also
 take longer than 8 seconds on a long conversation, so raise
 `CHAT_CLASSIFY_TIMEOUT` too.
+
+**Entity kinds.** Extraction may label an entity Person, Team, Company,
+Product, Project, System, Repository, Decision, Task, Blocker or Concept by
+default. Material that isn't about work wants other kinds; pass your own, e.g.
+`Settings(entity_kinds=["Person", "Place", "Event", "Organization",
+"Preference", "Task", "Concept"])` or
+`ENTITY_KINDS='["Person","Place","Event"]'`. The extraction prompt names
+exactly these, matching is case-insensitive, and anything else the model
+returns is stored as `Concept`, which is always included.
+
+**Relationship predicates.** By default extraction may use owns, assigned_to,
+blocks, resolves, decides, proposes, requests, updates, implements, uses,
+part_of, affects, depends_on and related_to. Each predicate also says how many
+current edges it admits, which is what drives supersession (below):
+`one_per_subject` (a new assertion closes the subject's previous edge: a person
+`lives_in` one place at a time; by default `assigned_to`), `one_per_object`
+(closes the object's previous edge: a thing has one owner; by default `owns`)
+or `many` (edges accumulate). Pass your own as a mapping, or as a list when all
+of them accumulate:
+
+```python
+Settings(relationship_predicates={
+    "lives_in": "one_per_subject", "works_at": "one_per_subject",
+    "likes": "many", "dislikes": "many", "prefers": "many",
+    "attending": "many", "scheduled_for": "many", "knows": "many",
+})
+# RELATIONSHIP_PREDICATES='{"lives_in": "one_per_subject", "likes": "many"}'
+```
+
+The extraction prompt names exactly these; predicates are snake-cased before
+matching, and anything else becomes `related_to`, which is always included and
+always `many`. `ConsolidationService`, `apply_plan` and `review_relationship`
+read the single-valued ones from the settings they are given (pass
+`settings=` to the latter two), unless an explicit `functional=` overrides them.
+Build a new `Settings(...)` to change these; `model_copy(update=...)` skips the
+normalization.
+
+**Writer mode.** By default Mem0 is only the vector index: each episode is
+stored as verbatim chunks and no model reads it beyond System 1's label. With
+`MEM0_WRITER_MODE=true`, Mem0's own write path also runs (`add(infer=True)`):
+after the episode is committed, the chat model reads it with the group's
+related facts and writes new standalone ones ("Asha is moving to Pune in March
+2027"), embedded and tagged `memory_kind: fact` with the episode's id. Recall
+folds a fact hit into its episode's candidate: the judge reads the matching
+facts, dated by their conversation, before the matching chunks. When it picks
+that episode, `answer` is the matching facts alone and the citation quotes the
+chunks (or the whole conversation), never the paraphrase.
+Facts share `MEMORY_SEARCH_TOP_K` with chunks, so consider raising it.
+
+- *Cost:* per episode, one chat call to extract (input: the conversation, up to
+  ten related facts, plus `MEM0_FACT_CONTEXT_EPISODES` earlier episodes), one
+  embedding per fact, one batched embedding call for the supersession search,
+  and one small chat call to judge conflicts — skipped when no current fact is
+  similar enough — all on the configured models and keys. A longer
+  version of an episode replaces its facts with a fresh extraction.
+- *Corrections retire what they correct.* Mem0 2.0 only adds facts, so after
+  each extraction Synapse compares every new fact with the group's nearest
+  current facts from other conversations (`MEM0_SUPERSESSION_CANDIDATES`, at
+  least `MEM0_SUPERSESSION_THRESHOLD` similar) and one chat call names the pairs
+  that cannot both be true ("it's Krati, not Kathy"; "moving to Mumbai" after
+  "moving to Pune"). As in the graph, the older of each pair is closed, not
+  deleted: it keeps its text and gets `status: superseded`, `invalid_at` (when
+  the newer was said) and `superseded_by`, and recall no longer finds it. Order
+  comes from when each was said, so a conversation imported late has its own
+  fact retired instead of a newer one. When a growing thread is read again,
+  facts its old reading had retired are reinstated and checked against the new
+  reading. Mem0's ADD-only extraction never touches chunks or recall's
+  write-backs.
+- *Repair and backfill:* extraction runs after the episode is saved and a
+  failure costs only the facts (or, for the conflict check, only the check);
+  `reindex_missing` retries either for any source episode (including ones
+  stored before writer mode), and
+  `reindex_group` drops every vector and rebuilds, facts included.
+- Mem0's entity linking needs spaCy (`pip install "mem0ai[nlp]"`, which
+  downloads a model on first use) and is skipped without it. Mem0's LLM
+  reranker is not used: it makes one chat call per search result.
 
 **Changing the embedding model** invalidates the index, since vectors from two
 models can't be compared. Use a new `MEM0_COLLECTION` and re-index.

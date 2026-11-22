@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
+from synapse.config import Settings
 from synapse.consolidation.models import ConsolidationPlan, EntitySpec, ExtractionResult
 from synapse.consolidation.models import RelationshipSpec as Spec
 from synapse.consolidation.service import ConsolidationService
@@ -323,3 +324,52 @@ async def test_a_plan_can_be_applied_without_a_full_run(session) -> None:
     assert not await retire_relationship(current.id, ACME, JULY, session)
     await session.commit()
     assert await edges(ACME, session) == []
+
+
+PERSONAL = Settings(
+    relationship_predicates={"lives_in": "one_per_subject", "likes": "many", "knows": "many"}
+)
+PLACES = [
+    EntitySpec(key="Person:sam", kind="Person", canonical_name="Sam"),
+    EntitySpec(key="Place:pune", kind="Place", canonical_name="Pune"),
+    EntitySpec(key="Place:mumbai", kind="Place", canonical_name="Mumbai"),
+]
+
+
+async def test_configured_single_valued_predicates_drive_supersession(session) -> None:
+    """lives_in is one place at a time; likes accumulates. Only the settings say so."""
+    await add_episode(ACME, "march", MARCH, session)
+    await add_episode(ACME, "july", JULY, session)
+
+    def plan(predicate: str, place: str, source_id: str) -> ConsolidationPlan:
+        return ConsolidationPlan(entities=PLACES, relationships=[
+            Spec(subject_key="Person:sam", predicate=predicate, object_key=place,
+                 evidence_source_ids=[source_id])])
+
+    for predicate in ("lives_in", "likes"):
+        for place, source_id in (("Place:pune", "march"), ("Place:mumbai", "july")):
+            await ConsolidationService(
+                extractor=FixedExtractor(plan(predicate, place, source_id)),
+                enricher=None,
+                settings=PERSONAL,
+            ).run(ACME, session)
+
+    current = {(edge.predicate, edge.object.canonical_name) for edge in await edges(ACME, session)}
+    assert current == {("lives_in", "Mumbai"), ("likes", "Pune"), ("likes", "Mumbai")}
+
+
+async def test_apply_plan_reads_single_valued_predicates_from_settings(session) -> None:
+    from synapse.consolidation.service import apply_plan
+
+    await add_episode(ACME, "march", MARCH, session)
+    await add_episode(ACME, "july", JULY, session)
+
+    def lives_in(place: str, source_id: str) -> ConsolidationPlan:
+        return ConsolidationPlan(entities=PLACES, relationships=[
+            Spec(subject_key="Person:sam", predicate="lives_in", object_key=place,
+                 evidence_source_ids=[source_id])])
+
+    await apply_plan(lives_in("Place:pune", "march"), ACME, session, settings=PERSONAL)
+    diff = await apply_plan(lives_in("Place:mumbai", "july"), ACME, session, settings=PERSONAL)
+
+    assert diff.superseded == 1

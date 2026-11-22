@@ -1,11 +1,19 @@
 import json
-import re
+from collections.abc import Iterable, Sequence
 
 import httpx
 from json_repair import repair_json
 from pydantic import BaseModel, Field, ValidationError
 
-from synapse.config import Settings, get_settings
+from synapse.config import (
+    DEFAULT_ENTITY_KINDS,
+    DEFAULT_RELATIONSHIP_PREDICATES,
+    FALLBACK_ENTITY_KIND,
+    FALLBACK_PREDICATE,
+    Settings,
+    get_settings,
+    snake_case,
+)
 from synapse.domain.models import (
     SemanticAssertions,
     SemanticEntityAssertion,
@@ -19,45 +27,43 @@ from synapse.inference.chat import (
     parse_json_object,
 )
 
-SYSTEM_PROMPT = """Extract the single strongest explicit organizational relationship from
-one work conversation. Return exactly one flat JSON object with: supported (boolean),
+SYSTEM_PROMPT_TEMPLATE = """Extract the single strongest explicit {scope} from
+{source}. Return exactly one flat JSON object with: supported (boolean),
 subject_kind, subject_name, predicate, object_kind, object_name, confidence. Allowed kinds:
-Person, Team, Company, Product, Project, System, Repository, Decision, Task, Blocker,
-Concept. Use a short snake_case predicate. If no explicit relationship exists, return
-supported false and empty strings. Predicate must be one of: owns, assigned_to, blocks,
-resolves, decides, proposes, requests, updates, implements, uses, part_of, affects,
-depends_on, related_to. Do not infer facts or add commentary. Output JSON only."""
+{kinds}. Use a short snake_case predicate. If no explicit relationship exists, return
+supported false and empty strings. Predicate must be one of: {predicates}.
+Do not infer facts or add commentary. Output JSON only."""
 
-ALLOWED_KINDS = {
-    "Person",
-    "Team",
-    "Company",
-    "Product",
-    "Project",
-    "System",
-    "Repository",
-    "Decision",
-    "Task",
-    "Blocker",
-    "Concept",
-}
+# The defaults, kept under their old names for code that imported them. The
+# ones actually allowed are ``Settings.entity_kinds`` and
+# ``Settings.relationship_predicates``.
+ALLOWED_KINDS = set(DEFAULT_ENTITY_KINDS)
+ALLOWED_PREDICATES = set(DEFAULT_RELATIONSHIP_PREDICATES)
 
-ALLOWED_PREDICATES = {
-    "owns",
-    "assigned_to",
-    "blocks",
-    "resolves",
-    "decides",
-    "proposes",
-    "requests",
-    "updates",
-    "implements",
-    "uses",
-    "part_of",
-    "affects",
-    "depends_on",
-    "related_to",
-}
+
+def system_prompt(
+    kinds: Sequence[str] = DEFAULT_ENTITY_KINDS,
+    predicates: Iterable[str] = DEFAULT_RELATIONSHIP_PREDICATES,
+) -> str:
+    """The extraction prompt, naming the kinds and predicates the model may use.
+
+    The default vocabulary is about work, and so is the default wording; a
+    host that configures its own (a personal assistant, say) gets prompt
+    wording that does not tell the model its conversations are about work.
+    """
+    predicate_list = list(predicates)
+    default = list(kinds) == list(DEFAULT_ENTITY_KINDS) and predicate_list == list(
+        DEFAULT_RELATIONSHIP_PREDICATES
+    )
+    return SYSTEM_PROMPT_TEMPLATE.format(
+        scope="organizational relationship" if default else "relationship",
+        source="one work conversation" if default else "one conversation",
+        kinds=", ".join(kinds),
+        predicates=", ".join(predicate_list),
+    )
+
+
+SYSTEM_PROMPT = system_prompt()
 
 
 class CompactAssertion(BaseModel):
@@ -79,7 +85,13 @@ class LLMAssertionInterpreter:
             body = await chat_completion(
                 self.settings,
                 [
-                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {
+                        "role": "system",
+                        "content": system_prompt(
+                            self.settings.entity_kinds,
+                            self.settings.relationship_predicates,
+                        ),
+                    },
                     {
                         "role": "user",
                         "content": (
@@ -127,9 +139,12 @@ class LLMAssertionInterpreter:
             raise InferenceError(
                 f"Semantic assertion extraction returned incomplete data for {event.source_id}"
             )
-        subject_kind = normalize_kind(assertion.subject_kind)
-        object_kind = normalize_kind(assertion.object_kind)
-        predicate = normalize_predicate(assertion.predicate)
+        kinds = self.settings.entity_kinds
+        subject_kind = normalize_kind(assertion.subject_kind, kinds)
+        object_kind = normalize_kind(assertion.object_kind, kinds)
+        predicate = normalize_predicate(
+            assertion.predicate, self.settings.relationship_predicates
+        )
         return SemanticAssertions(
             entities=[
                 SemanticEntityAssertion(
@@ -156,16 +171,33 @@ class LLMAssertionInterpreter:
         )
 
 
-def normalize_kind(value: str) -> str:
-    normalized = value.strip().title()
-    return normalized if normalized in ALLOWED_KINDS else "Concept"
+def normalize_kind(value: str, kinds: Sequence[str] = DEFAULT_ENTITY_KINDS) -> str:
+    """The configured spelling of ``value``'s kind, or ``Concept`` if it has none.
+
+    Matched without regard to case or spacing, since the model's capitalisation
+    is not something to depend on.
+    """
+    wanted = " ".join(value.split()).casefold()
+    return next(
+        (kind for kind in kinds if " ".join(kind.split()).casefold() == wanted),
+        FALLBACK_ENTITY_KIND,
+    )
 
 
-def normalize_predicate(value: str) -> str:
-    normalized = re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
+def normalize_predicate(
+    value: str, predicates: Iterable[str] = DEFAULT_RELATIONSHIP_PREDICATES
+) -> str:
+    """The configured predicate ``value`` means, or ``related_to`` if none.
+
+    An exact match (after snake-casing) wins. Failing that, a few common
+    phrasings are mapped onto the workplace predicates, but only onto ones the
+    configuration actually allows.
+    """
+    allowed = set(predicates)
+    normalized = snake_case(value)
     if not normalized:
         raise ValueError("Assertion predicate cannot be empty")
-    if normalized in ALLOWED_PREDICATES:
+    if normalized in allowed:
         return normalized
     mappings = (
         (("owner",), "owns"),
@@ -184,7 +216,7 @@ def normalize_predicate(value: str) -> str:
         (
             predicate
             for markers, predicate in mappings
-            if any(marker in normalized for marker in markers)
+            if predicate in allowed and any(marker in normalized for marker in markers)
         ),
-        "related_to",
+        FALLBACK_PREDICATE,
     )

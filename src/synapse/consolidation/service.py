@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from synapse.config import Settings, get_settings
+from synapse.config import DEFAULT_RELATIONSHIP_PREDICATES, Settings, get_settings
 from synapse.consolidation.extractor import normalize_name
 from synapse.consolidation.llm_extractor import LLMSemanticExtractor, SemanticExtractor
 from synapse.consolidation.models import (
@@ -39,10 +39,15 @@ from synapse.enrichment.crustdata import CompanyEnricher, CrustdataEnricher
 # history that is still true. Being wrong in this direction is expensive —
 # a wrongly retired edge is a fact the graph can no longer state — so the sets
 # stay small and only hold predicates that are functional by their own meaning.
-SUBJECT_FUNCTIONAL = frozenset({"assigned_to"})
+# These are the defaults; ``Settings.relationship_predicates`` is the source.
+SUBJECT_FUNCTIONAL = frozenset(
+    p for p, c in DEFAULT_RELATIONSHIP_PREDICATES.items() if c == "one_per_subject"
+)
 """One object per subject: a task has a single assignee at a time."""
 
-OBJECT_FUNCTIONAL = frozenset({"owns"})
+OBJECT_FUNCTIONAL = frozenset(
+    p for p, c in DEFAULT_RELATIONSHIP_PREDICATES.items() if c == "one_per_object"
+)
 """One subject per object: a thing has a single owner at a time.
 
 ``owns`` points from person to thing, so the constraint is on the object. A
@@ -60,6 +65,24 @@ class FunctionalPredicates:
 
     subject: frozenset[str] = SUBJECT_FUNCTIONAL
     object: frozenset[str] = OBJECT_FUNCTIONAL
+
+    @classmethod
+    def from_settings(cls, settings: Settings) -> "FunctionalPredicates":
+        """The single-valued predicates ``Settings.relationship_predicates`` names."""
+        predicates = settings.relationship_predicates
+        return cls(
+            subject=frozenset(p for p, c in predicates.items() if c == "one_per_subject"),
+            object=frozenset(p for p, c in predicates.items() if c == "one_per_object"),
+        )
+
+
+def _resolve_functional(
+    functional: FunctionalPredicates | None, settings: Settings | None
+) -> FunctionalPredicates:
+    """An explicit ``functional`` wins; otherwise the settings say."""
+    if functional is not None:
+        return functional
+    return FunctionalPredicates.from_settings(settings or get_settings())
 
 
 @dataclass
@@ -167,6 +190,7 @@ async def apply_relationships(
     *,
     functional: FunctionalPredicates | None = None,
     status: ReviewStatus = ReviewStatus.ACTIVE,
+    settings: Settings | None = None,
 ) -> RelationshipDiff:
     """Merge edges into the graph, oldest assertion first.
 
@@ -179,7 +203,7 @@ async def apply_relationships(
     and is left open beside the newer one: two current owners. Plans come
     sorted by key, not by time, so this sorts them.
     """
-    functional = functional or FunctionalPredicates()
+    functional = _resolve_functional(functional, settings)
     diff = RelationshipDiff()
     dated = sorted(
         ((_asserted_at(spec, episode_by_source_id), spec) for spec in specs),
@@ -263,6 +287,7 @@ async def apply_plan(
     *,
     functional: FunctionalPredicates | None = None,
     status: ReviewStatus = ReviewStatus.ACTIVE,
+    settings: Settings | None = None,
 ) -> RelationshipDiff:
     """Merge a plan's entities, edges and statements into the graph, without a full run.
 
@@ -296,7 +321,7 @@ async def apply_plan(
         episodes,
         group_id,
         session,
-        functional=functional,
+        functional=_resolve_functional(functional, settings),
         status=status,
     )
     stated = await apply_statements(
@@ -430,6 +455,7 @@ async def review_relationship(
     session: AsyncSession,
     *,
     functional: FunctionalPredicates | None = None,
+    settings: Settings | None = None,
 ) -> bool:
     """Accept or reject a proposed edge. False when there is no such proposal.
 
@@ -449,7 +475,7 @@ async def review_relationship(
     await session.flush()
     if approve:
         await _supersede(
-            edge, group_id, edge.valid_at, session, functional or FunctionalPredicates()
+            edge, group_id, edge.valid_at, session, _resolve_functional(functional, settings)
         )
     return True
 
@@ -589,7 +615,7 @@ class ConsolidationService:
         resolved = settings or get_settings()
         self.extractor = extractor or LLMSemanticExtractor(resolved)
         self.enricher = enricher or CrustdataEnricher(resolved)
-        self.functional = functional or FunctionalPredicates()
+        self.functional = _resolve_functional(functional, resolved)
 
     async def run(self, group_id: str, session: AsyncSession) -> ConsolidationRun:
         run = ConsolidationRun(

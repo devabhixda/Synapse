@@ -16,6 +16,12 @@ without Postgres now always run.
 
 from __future__ import annotations
 
+import os
+
+# Mem0 reads this once, at import: off before anything imports it, so tests
+# that build a real Memory send no telemetry.
+os.environ.setdefault("MEM0_TELEMETRY", "False")
+
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -54,3 +60,4 @@ async def session(
 async def memory_db_path(tmp_path: Path) -> Any:
     """A path for a Mem0 vector store file, isolated per test."""
     return str(tmp_path / "memory.db")
+

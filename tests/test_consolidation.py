@@ -154,3 +154,31 @@ def test_adjudication_alias_map_only_targets_canonical_entities() -> None:
     product = next(entity for entity in plan.entities if entity.canonical_name == "Prism")
     assert "Prism AI" in product.aliases
     assert all(entity.canonical_name != "unknown" for entity in plan.entities)
+
+def test_llm_plan_uses_the_configured_kinds() -> None:
+    episodes = [episode("dinner", "Asha booked Olive Bistro for Friday.", ["Asha"])]
+    raw_plan = RawConsolidationPlan.model_validate(
+        {
+            "entities": [
+                {"kind": "person", "canonical_name": "Asha"},
+                {"kind": "place", "canonical_name": "Olive Bistro"},
+            ],
+            "relationships": [
+                {
+                    "subject_kind": "PERSON",
+                    "subject_name": "Asha",
+                    "predicate": "booked",
+                    "object_kind": "Place",
+                    "object_name": "Olive Bistro",
+                    "evidence_source_ids": ["dinner"],
+                }
+            ],
+        }
+    )
+
+    personal = normalize_raw_plan(raw_plan, episodes, ["Person", "Place", "Concept"])
+    workplace = normalize_raw_plan(raw_plan, episodes)
+
+    assert {entity.key for entity in personal.entities} == {"Person:asha", "Place:olive bistro"}
+    assert personal.relationships[0].object_key == "Place:olive bistro"
+    assert "Concept:olive bistro" in {entity.key for entity in workplace.entities}
