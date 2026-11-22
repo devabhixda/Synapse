@@ -115,6 +115,7 @@ class SourceType(StrEnum):
     RECALL = "recall"
     WHATSAPP = "whatsapp"
     CALL = "call"
+    GEMINI = "gemini"
 
 
 episode_kind_enum = Enum(

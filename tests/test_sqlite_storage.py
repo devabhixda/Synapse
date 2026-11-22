@@ -259,7 +259,7 @@ async def test_the_vector_store_can_write_while_a_transaction_is_open(
     assert waited < 1.0
 
 
-async def test_a_database_from_before_whatsapp_and_call_stores_them(tmp_path: Path) -> None:
+async def test_a_database_from_before_whatsapp_call_and_gemini_stores_them(tmp_path: Path) -> None:
     """0.2.5 sized ``source_type`` as VARCHAR(7); ``whatsapp`` is eight characters.
 
     Nothing needs migrating — the column carries no CHECK constraint and SQLite
@@ -282,7 +282,11 @@ async def test_a_database_from_before_whatsapp_and_call_stores_them(tmp_path: Pa
         assert await conn.run_sync(create_schema) == []
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     async with sessions() as session:
-        for source_type in (models.SourceType.WHATSAPP, models.SourceType.CALL):
+        for source_type in (
+            models.SourceType.WHATSAPP,
+            models.SourceType.CALL,
+            models.SourceType.GEMINI,
+        ):
             session.add(
                 models.Episode(
                     group_id="owner",
@@ -301,4 +305,8 @@ async def test_a_database_from_before_whatsapp_and_call_stores_them(tmp_path: Pa
         stored = (await session.scalars(query)).all()
     await engine.dispose()
 
-    assert stored == [models.SourceType.CALL, models.SourceType.WHATSAPP]
+    assert stored == [
+        models.SourceType.CALL,
+        models.SourceType.GEMINI,
+        models.SourceType.WHATSAPP,
+    ]
