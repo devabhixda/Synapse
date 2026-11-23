@@ -257,12 +257,16 @@ flowchart LR
     Q[Question] --> E{An episode answers?}
     E -->|Yes| A[Answer from the episode, cited]
     E -->|No| G[Answer from the graph, cited]
-    G --> W[Store the answer as a new episode]
+    G -.->|if enabled| W[Store the answer as a new episode]
 ```
 
 Recall searches episodes and asks the chat model whether the best match
-actually answers the question. If none does, it answers from the graph and
-writes that answer back as an episode, so memory learns from its own lookups.
+actually answers the question. If none does, it answers from the graph, with
+`answer_origin` `semantic_fallback`. With `RECALL_WRITE_BACK_SEMANTIC_FALLBACK`
+on, that answer is also written back as a retrieval episode and indexed, so
+memory learns from its own lookups. It is off by default since 0.2.9: a graph
+answer rests on a name or word match, and indexing a weak one lets it return
+later as if a conversation had said it.
 A graph answer states the entities the question names and at most 12 of
 their current edges, those between two named entities first, then the most
 recent.
@@ -297,6 +301,7 @@ Settings are read from the environment (or a `.env` file), or passed to
 | `MEM0_SUPERSESSION_THRESHOLD` | `0.5` | How similar a current fact must be to be checked |
 | `MEM0_COLLECTION` | `synapse_episodes` | The index's collection name; one per embedding model |
 | `MEMORY_HIT_THRESHOLD` | `0.62` | How close an episode must be to answer from it |
+| `RECALL_WRITE_BACK_SEMANTIC_FALLBACK` | `false` | Store and index answers drawn from the graph as retrieval episodes |
 | `INFERENCE_MODE` | `auto` | `fake` gives deterministic labels with no model, for tests |
 | `CONSOLIDATION_CONTENT_EXTRACTION` | `false` | Have the chat model read episodes that carry no `semantic_assertions` during consolidation |
 | `CONSOLIDATION_CHAT_MODEL` | `CHAT_MODEL` | The model consolidation calls on the chat endpoint |

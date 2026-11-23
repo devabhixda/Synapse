@@ -162,6 +162,12 @@ class Settings(BaseSettings):
     enrichment_cache_hours: int = Field(default=24, ge=1)
     procedural_min_occurrences: int = Field(default=2, ge=2)
     memory_hit_threshold: float = Field(default=0.62, ge=0, le=1)
+    # Whether an answer recall draws from the graph (``semantic_fallback``) is
+    # also stored as a retrieval episode and indexed, so later searches find
+    # it. Off by default: such an answer comes from a name or word match, and
+    # indexing it lets a weak one come back later as if a conversation had said
+    # it. Answers from episodes are never written back either way.
+    recall_write_back_semantic_fallback: bool = False
     # One collection per embedding model: vectors from two models can't be
     # compared, so a new model needs a new collection and a re-index.
     mem0_collection: str = "synapse_episodes"

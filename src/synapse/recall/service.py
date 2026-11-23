@@ -88,6 +88,7 @@ class RecallService:
         settings: Settings | None = None,
     ) -> None:
         resolved = settings or get_settings()
+        self.settings = resolved
         self.memory_store = memory_store or Mem0EpisodeStore(resolved)
         self.judge = judge or EpisodeAnswerabilityJudge(resolved)
 
@@ -167,13 +168,17 @@ class RecallService:
             await self._record_event(result, group_id, normalized, session)
             return result
 
-        retrieval_episode = await self._write_back(
-            query=query,
-            group_id=group_id,
-            normalized_query=normalized,
-            answer=semantic.answer,
-            citations=semantic.citations,
-            session=session,
+        retrieval_episode = (
+            await self._write_back(
+                query=query,
+                group_id=group_id,
+                normalized_query=normalized,
+                answer=semantic.answer,
+                citations=semantic.citations,
+                session=session,
+            )
+            if self.settings.recall_write_back_semantic_fallback
+            else None
         )
         result = RecallResult(
             query=query,
@@ -187,7 +192,7 @@ class RecallService:
                 "episodic_candidates": len(candidates),
                 "semantic_matches": len(semantic.selected_ids),
             },
-            created_episode_id=str(retrieval_episode.id),
+            created_episode_id=str(retrieval_episode.id) if retrieval_episode else None,
             latency_ms=(time.perf_counter() - started) * 1000,
         )
         await self._record_event(result, group_id, normalized, session)
