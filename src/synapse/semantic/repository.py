@@ -103,8 +103,15 @@ async def load_statements(
 
 
 async def search_semantic_context(
-    query: str, group_id: str, session: AsyncSession
+    query: str, group_id: str, session: AsyncSession, *, max_relationships: int = 12
 ) -> SemanticContextResult:
+    """Answer from the graph: the entities a query names and their current edges.
+
+    At most ``max_relationships`` edges are stated, those between two matched
+    entities first and then the most recent. A hub (the owner of a personal
+    assistant's memory, say) gathers hundreds of edges, and listing them all
+    would bury the one asked about and write the pile back as an episode.
+    """
     entities = await load_entities(group_id, session)
     relationships = await load_relationships(group_id, session)
     normalized_query = normalize_text(query)
@@ -134,12 +141,21 @@ async def search_semantic_context(
         if entity.kind not in {"Project", "Concept"}
     }
     relationship_anchor_ids = specific_matched_ids or matched_ids
-    connected = [
-        relationship
-        for relationship in relationships
-        if relationship.subject_id in relationship_anchor_ids
-        or relationship.object_id in relationship_anchor_ids
-    ]
+    connected = sorted(
+        (
+            relationship
+            for relationship in relationships
+            if relationship.subject_id in relationship_anchor_ids
+            or relationship.object_id in relationship_anchor_ids
+        ),
+        key=lambda relationship: (
+            not (
+                relationship.subject_id in matched_ids
+                and relationship.object_id in matched_ids
+            ),
+            -relationship.valid_at.timestamp(),
+        ),
+    )[:max_relationships]
 
     answer_parts: list[str] = []
     citations: list[RecallCitation] = []

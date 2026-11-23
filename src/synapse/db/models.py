@@ -348,6 +348,39 @@ class ConsolidationEpisode(Tenanted, Base):
     episode: Mapped[Episode] = relationship()
 
 
+class ConsolidationEpisodeState(Tenanted, Base):
+    """Which version of an episode the graph has read, one row per episode.
+
+    ``fingerprint`` is a hash of what extraction reads (content, participants,
+    when it happened, any attached assertions) as of the last run that
+    consolidated it. An episode is due when it has no row or its current hash
+    differs, which is how a thread that grew gets read again.
+
+    ``failed_fingerprint`` and ``attempts`` count runs in a row in which the
+    model could not extract that version; past the configured limit it is
+    skipped until it changes. A run that stops because the endpoint is down
+    counts nothing, so the next run simply resumes.
+    """
+
+    __tablename__ = "consolidation_episode_states"
+    __table_args__ = (
+        UniqueConstraint("episode_id", name="uq_consolidation_episode_state"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    episode_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("episodes.id", ondelete="CASCADE")
+    )
+    fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("consolidation_runs.id", ondelete="SET NULL"), nullable=True
+    )
+    consolidated_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    failed_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class SemanticEntity(Tenanted, Base):
     __tablename__ = "semantic_entities"
     __table_args__ = (

@@ -191,3 +191,70 @@ async def test_no_candidates_is_decided_without_asking_anyone() -> None:
         del EpisodeAnswerabilityJudge._attempt
 
     assert not selection.answerable and calls == []
+
+
+async def _graph_answer(session, write_back: bool):
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from synapse.config import Settings
+    from synapse.consolidation.models import ConsolidationPlan, EntitySpec, RelationshipSpec
+    from synapse.consolidation.service import apply_plan
+    from synapse.db.models import Episode, EpisodeKind, SourceType
+    from synapse.recall.models import EpisodeSelection
+    from synapse.recall.service import RecallService
+
+    session.add(Episode(group_id="owner", kind=EpisodeKind.SOURCE, source_type=SourceType.CALL,
+                        source_id="c1", conversation_id="c1", content="Asha likes tea.",
+                        participants=["Asha"], details={}, occurred_at=datetime.now(UTC)))
+    await apply_plan(ConsolidationPlan(
+        entities=[EntitySpec(key="Person:asha", kind="Person", canonical_name="Asha"),
+                  EntitySpec(key="Concept:tea", kind="Concept", canonical_name="tea")],
+        relationships=[RelationshipSpec(subject_key="Person:asha", predicate="likes",
+                                        object_key="Concept:tea", evidence_source_ids=["c1"])],
+    ), "owner", session)
+    await session.commit()
+
+    indexed: list[str] = []
+
+    class Store:
+        async def search(self, query: str, group_id: str) -> list[dict[str, object]]:
+            return []
+
+        async def add_retrieval_episode(self, **kwargs: object) -> str:
+            indexed.append(str(kwargs["answer"]))
+            return "vector-1"
+
+    class Judge:
+        async def select(self, query: str, candidates: list[object]) -> EpisodeSelection:
+            return EpisodeSelection(answerable=False)
+
+    recall = RecallService(
+        memory_store=Store(),  # type: ignore[arg-type]
+        judge=Judge(),  # type: ignore[arg-type]
+        settings=Settings(_env_file=None, recall_write_back_semantic_fallback=write_back),
+    )
+    result = await recall.recall("what does Asha like?", "owner", session)
+    retrievals = list(await session.scalars(
+        select(Episode).where(Episode.kind == EpisodeKind.RETRIEVAL)
+    ))
+    return result, retrievals, indexed
+
+
+async def test_a_graph_answer_is_not_written_back_by_default(session) -> None:
+    """Indexing it would let a weak name match come back as if it had been said."""
+    result, retrievals, indexed = await _graph_answer(session, write_back=False)
+
+    assert result.answer_origin == "semantic_fallback"
+    assert result.answer is not None and "Asha likes tea" in result.answer
+    assert result.created_episode_id is None
+    assert retrievals == [] and indexed == []
+
+
+async def test_a_graph_answer_is_written_back_when_enabled(session) -> None:
+    result, retrievals, indexed = await _graph_answer(session, write_back=True)
+
+    assert result.answer_origin == "semantic_fallback"
+    assert [str(episode.id) for episode in retrievals] == [result.created_episode_id]
+    assert len(indexed) == 1
