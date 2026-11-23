@@ -55,11 +55,19 @@ async def add_episode(group_id: str, source_id: str, occurred_at: datetime, sess
     await session.commit()
 
 
-async def consolidate(group_id: str, relationships: list[Spec], session) -> None:
+async def consolidate(
+    group_id: str, relationships: list[Spec], session, *, rebuild: bool = False
+) -> None:
+    """Run consolidation; ``rebuild`` makes every episode due again first.
+
+    Runs are incremental, so without it a run reads only episodes added since
+    the last one.
+    """
     plan = ConsolidationPlan(entities=PEOPLE, relationships=relationships)
-    await ConsolidationService(extractor=FixedExtractor(plan), enricher=None).run(
-        group_id, session
-    )
+    service = ConsolidationService(extractor=FixedExtractor(plan), enricher=None)
+    if rebuild:
+        await service.reset(group_id, session)
+    await service.run(group_id, session)
 
 
 async def edges(group_id: str, session, *, include_superseded: bool = False):
@@ -255,7 +263,7 @@ async def test_a_rebuild_does_not_reopen_what_was_retired(session) -> None:
     await add_episode(ACME, "july", JULY, session)
     both = [owns("priya", "july"), owns("sam", "march")]
     await consolidate(ACME, both, session)
-    await consolidate(ACME, both, session)
+    await consolidate(ACME, both, session, rebuild=True)
 
     assert await owners(session) == ["Priya"]
     sam = next(e for e in await edges(ACME, session, include_superseded=True)
@@ -294,7 +302,8 @@ async def test_evidence_keeps_the_quote_and_refuses_one_that_was_not_said(sessio
 
     with pytest.raises(ValueError, match="does not appear"):
         await consolidate(ACME, [owns("priya", "march",
-                                      evidence_quotes={"march": "Priya owns it now"})], session)
+                                      evidence_quotes={"march": "Priya owns it now"})], session,
+                          rebuild=True)
 
 
 async def test_a_plan_can_be_applied_without_a_full_run(session) -> None:
@@ -348,11 +357,13 @@ async def test_configured_single_valued_predicates_drive_supersession(session) -
 
     for predicate in ("lives_in", "likes"):
         for place, source_id in (("Place:pune", "march"), ("Place:mumbai", "july")):
-            await ConsolidationService(
+            service = ConsolidationService(
                 extractor=FixedExtractor(plan(predicate, place, source_id)),
                 enricher=None,
                 settings=PERSONAL,
-            ).run(ACME, session)
+            )
+            await service.reset(ACME, session)
+            await service.run(ACME, session)
 
     current = {(edge.predicate, edge.object.canonical_name) for edge in await edges(ACME, session)}
     assert current == {("lives_in", "Mumbai"), ("likes", "Pune"), ("likes", "Mumbai")}

@@ -314,3 +314,54 @@ async def test_a_database_from_before_the_newer_source_types_stores_them(tmp_pat
         models.SourceType.GEMINI,
         models.SourceType.WHATSAPP,
     ]
+
+
+async def test_a_database_from_before_incremental_consolidation_is_upgraded(
+    tmp_path: Path,
+) -> None:
+    """0.2.8 had the consolidation tables but no per-episode state.
+
+    A host that never ran consolidation has the tables and no runs; after
+    ``create_schema`` every episode it holds is due.
+    """
+    from synapse.consolidation.models import ConsolidationPlan, ExtractionResult
+    from synapse.consolidation.service import ConsolidationService
+
+    path = tmp_path / "old.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
+    configure_sqlite(engine)
+    async with engine.begin() as conn:
+        await conn.run_sync(create_schema)
+    with sqlite3.connect(path) as db:
+        db.execute("DROP TABLE consolidation_episode_states")
+
+    async with engine.begin() as conn:
+        assert await conn.run_sync(create_schema) == []
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as session:
+        session.add(
+            models.Episode(
+                group_id="owner",
+                kind=models.EpisodeKind.SOURCE,
+                source_type=models.SourceType.WHATSAPP,
+                source_id="w-1",
+                content="Dinner with Asha at 8 on Friday.",
+                participants=["Asha"],
+                details={},
+                occurred_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
+        class Empty:
+            async def extract(self, episodes: list[models.Episode]) -> ExtractionResult:
+                return ExtractionResult(
+                    plan=ConsolidationPlan(entities=[], relationships=[]), provider="stub"
+                )
+
+        consolidation = ConsolidationService(extractor=Empty(), enricher=None)
+        assert (await consolidation.backlog("owner", session)).due == 1
+        run = await consolidation.run("owner", session)
+        assert run.episode_count == 1
+        assert (await consolidation.backlog("owner", session)).due == 0
+    await engine.dispose()

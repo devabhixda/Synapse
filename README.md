@@ -121,7 +121,9 @@ made by earlier releases accept the newer values without a migration.
 `process` is idempotent on `source_id`: storing the same conversation again
 costs nothing, and a longer version of it (a thread that got replies) replaces
 the stored one and its vectors. Build the graph from stored episodes with
-`ConsolidationService(settings=settings).run("acme", session)`.
+`ConsolidationService(settings=settings).run("acme", session)`; each run reads
+only what is new or changed, up to its limits (see
+[Consolidation](#consolidation)).
 
 ## How it works
 
@@ -137,10 +139,13 @@ graph holds canonical entities.
 
 ### The semantic graph (System 2)
 
-A consolidation run reads a snapshot of episodes and merges what they assert
-into entities and relationships. The merge is deterministic; a model only
-decides whether two names are the same thing. Every relationship cites its
-episode.
+A consolidation run reads the episodes that are new or changed since the last
+run and merges what they assert into entities and relationships. What an
+episode asserts comes from `semantic_assertions` a host attaches when writing
+it and from its participants; with `CONSOLIDATION_CONTENT_EXTRACTION` on, the
+chat model also reads the content of episodes that carry none. The merge is
+deterministic, and a name that is already an entity's alias links to that
+entity. Every relationship cites its episode.
 
 Relationships hold over a period. Each gets `valid_at` from the conversation
 that asserted it, and `invalid_at` stays empty while it is current. Predicates
@@ -170,6 +175,81 @@ against its episode, and when it was said. Written as `PROPOSED`, it is stored
 but not read, and retires nothing, until `review_relationship` or
 `review_statement` accepts it.
 
+### Consolidation
+
+Runs are incremental and bounded, so a host can run one nightly or hourly over
+a memory that only grows:
+
+```python
+from synapse.consolidation.models import ConsolidationSummary
+from synapse.consolidation.service import ConsolidationService
+
+consolidation = ConsolidationService(settings=settings)
+async with sessions() as session:
+    run = await consolidation.run("acme", session, max_episodes=300, max_tokens=500_000)
+summary = ConsolidationSummary.from_run(run)
+# summary.episodes_processed, .episodes_remaining, .has_more, .stopped_reason,
+# .entities_created, .relationships_superseded, .prompt_tokens, .provider, ...
+```
+
+- **What is due.** Each episode's last consolidated version is remembered as a
+  hash of what extraction reads (content, participants, time, attached
+  assertions). An episode is read when it is new or that hash changed, as when
+  a thread grows. `backlog(group_id, session)` reports how many are due without
+  reading them.
+- **Limits.** A run reads due episodes oldest first, in batches of at most
+  `CONSOLIDATION_BATCH_EPISODES` episodes and `CONSOLIDATION_BATCH_CHARS`
+  characters, and stops at `max_episodes` (default
+  `CONSOLIDATION_MAX_EPISODES_PER_RUN`, 200) or before a call that would cross
+  `max_tokens` (default `CONSOLIDATION_MAX_TOKENS_PER_RUN`, none). A batch too
+  large for the remaining budget is split until it fits; a run's first call
+  may go over by one episode, so a budget smaller than one episode still makes
+  progress. The rest is left for the next run, so a first run over a large
+  backlog spreads over several without any special handling.
+- **Failures.** Each batch commits on its own, so a run that crashes loses at
+  most the batch in flight. If the model endpoint is unreachable, rate-limited
+  or misconfigured, the run stops with status `failed` and `stopped_reason`
+  `error`, and the episodes it did not reach stay due; nothing is held against
+  them. A batch the model answers unusably, or refuses as too long or
+  disallowed, is split and retried down to single episodes. An episode that
+  fails on its own `CONSOLIDATION_MAX_ATTEMPTS` runs in a row is skipped
+  (`episodes_skipped`) until its content changes, so one bad episode cannot
+  hold up those after it. A refusal is only held against an episode once the
+  run has shown the model works; if the first six episodes a run tries all
+  fail, it blames the model and stops. Any other error marks the run failed
+  and is raised.
+- **When to run again.** `has_more` is true when episodes are left and the run
+  did not stop on an error; a host can loop on it to drain a backlog, or just
+  wait for its next scheduled run. After an `error` stop, retry later.
+- **Linking.** Each content-extraction call is shown up to
+  `CONSOLIDATION_KNOWN_ENTITIES` existing entities the batch mentions, with
+  their aliases, and told to reuse them.
+- **Rebuilding.** After changing kinds, predicates or the model, `reset(group_id,
+  session)` makes every episode due again; the following runs re-assert the
+  graph without reopening anything already retired.
+- **Upgrading.** `create_schema` (or Alembic revision 0003) adds the
+  per-episode state table. Every episode starts out due, including ones a full
+  run before 0.2.9 already read (a thread may have grown since); re-reading
+  them re-asserts what the graph holds without reopening anything retired.
+- **Enrichment** with Crustdata happens only when `CRUSTDATA_API_KEY` is set;
+  without it, no request is made (`enrichment_enabled` is false).
+- Run one consolidation per group at a time.
+
+**Model and cost.** Extraction uses the chat endpoint, with
+`CONSOLIDATION_CHAT_MODEL` if set and `CHAT_MODEL` otherwise, so a host can
+point it at a cheaper model than the one it chats with. Each call sends about
+600 tokens of instructions, the known entities, and each episode cut to
+`CONSOLIDATION_EPISODE_CHARS` (6,000) characters, and asks for at most
+`CONSOLIDATION_MAX_OUTPUT_TOKENS` (2,048). For 100 episodes averaging 3,000
+characters that is roughly 85,000-90,000 input tokens and 5,000-15,000 output
+tokens over 10-13 calls, about $0.01-0.02 on Gemini 2.5 Flash-Lite
+($0.10/$0.40 per million) or $0.03-0.05 on Gemini 3.1 Flash-Lite ($0.25/$1.50).
+Episodes at the 6,000-character cap roughly double the input. Runs report the
+tokens the endpoint returns (`prompt_tokens`, `completion_tokens`, or an
+estimate with `tokens_estimated` when it returns none); multiply by your price.
+With content extraction off, the only model call is a short alias check, made
+only for batches whose assertions name aliases.
+
 ### Recall
 
 ```mermaid
@@ -183,6 +263,9 @@ flowchart LR
 Recall searches episodes and asks the chat model whether the best match
 actually answers the question. If none does, it answers from the graph and
 writes that answer back as an episode, so memory learns from its own lookups.
+A graph answer states the entities the question names and at most 12 of
+their current edges, those between two named entities first, then the most
+recent.
 
 ### Procedures
 
@@ -215,7 +298,16 @@ Settings are read from the environment (or a `.env` file), or passed to
 | `MEM0_COLLECTION` | `synapse_episodes` | The index's collection name; one per embedding model |
 | `MEMORY_HIT_THRESHOLD` | `0.62` | How close an episode must be to answer from it |
 | `INFERENCE_MODE` | `auto` | `fake` gives deterministic labels with no model, for tests |
-| `CRUSTDATA_API_KEY` | none | Optional company enrichment during consolidation |
+| `CONSOLIDATION_CONTENT_EXTRACTION` | `false` | Have the chat model read episodes that carry no `semantic_assertions` during consolidation |
+| `CONSOLIDATION_CHAT_MODEL` | `CHAT_MODEL` | The model consolidation calls on the chat endpoint |
+| `CONSOLIDATION_MAX_EPISODES_PER_RUN` | `200` | Episodes one run reads; `None` for no limit |
+| `CONSOLIDATION_MAX_TOKENS_PER_RUN` | none | Chat tokens one run may spend |
+| `CONSOLIDATION_BATCH_EPISODES`, `CONSOLIDATION_BATCH_CHARS` | `10`, `24000` | The size of one extraction call |
+| `CONSOLIDATION_EPISODE_CHARS` | `6000` | How much of one episode extraction reads (its opening and, mostly, its end) |
+| `CONSOLIDATION_MAX_OUTPUT_TOKENS` | `2048` | Completion budget for one extraction call |
+| `CONSOLIDATION_KNOWN_ENTITIES` | `40` | Existing entities shown to each extraction call |
+| `CONSOLIDATION_MAX_ATTEMPTS` | `3` | Runs in a row an episode may fail extraction before it is skipped |
+| `CRUSTDATA_API_KEY` | none | Optional company enrichment during consolidation; without it no request is made |
 
 **Reasoning models.** Each call asks only for the tokens its answer needs (48
 for a label). A reasoning model spends its thinking from the same budget and
@@ -330,7 +422,7 @@ SYNAPSE_GROUP_ID=demo make replay   # or the sample events
 | --- | --- | --- |
 | `POST` | `/api/recall` | Recall, with citations |
 | `GET` | `/api/episodes` | Latest episodes and their index state |
-| `POST` | `/api/system2/consolidate` | Run a consolidation |
+| `POST` | `/api/system2/consolidate` | Run a consolidation (optional `max_episodes`, `max_tokens`) |
 | `GET` | `/api/system2/graph` | Entities, relationships and evidence |
 | `GET` | `/api/system2/runs` | Recent consolidations and what they changed |
 | `POST` | `/api/procedural/detect` | Find repeated recall workflows |

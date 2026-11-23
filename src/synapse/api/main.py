@@ -295,8 +295,12 @@ def consolidation_response(run: ConsolidationRun) -> ConsolidationRunResponse:
 async def consolidate(
     group_id: GroupId,
     session: Annotated[AsyncSession, Depends(get_session)],
+    max_episodes: Annotated[int | None, Query(ge=1)] = None,
+    max_tokens: Annotated[int | None, Query(ge=1)] = None,
 ) -> ConsolidationRunResponse:
-    run = await ConsolidationService().run(group_id, session)
+    run = await ConsolidationService().run(
+        group_id, session, max_episodes=max_episodes, max_tokens=max_tokens
+    )
     return consolidation_response(run)
 
 

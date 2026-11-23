@@ -120,6 +120,42 @@ class Settings(BaseSettings):
     chat_classify_timeout: float = Field(default=8, gt=0)
     inference_mode: str = "auto"
     consolidation_mode: str = "auto"
+    # Consolidation is incremental: a run reads only episodes it has not read
+    # in their current form, in batches, and stops at these limits, leaving the
+    # rest for the next run. A first run over a large backlog therefore spreads
+    # itself over several. None means no limit.
+    consolidation_max_episodes_per_run: int | None = Field(default=200, ge=1)
+    # Chat tokens (prompt plus completion) a run may spend, as the endpoint
+    # reports them, or estimated at four characters a token when it does not.
+    # A batch that would cross it is left for the next run.
+    consolidation_max_tokens_per_run: int | None = Field(default=None, ge=1)
+    # The most episodes, and the most characters of them, one extraction call
+    # reads. Smaller batches cost a little more prompt overhead per episode;
+    # larger ones risk a model that skims.
+    consolidation_batch_episodes: int = Field(default=10, ge=1)
+    consolidation_batch_chars: int = Field(default=24_000, ge=1_000)
+    # How much of one episode an extraction call reads. A longer one is cut in
+    # the middle, keeping its opening and (three times as much of) its end,
+    # where a growing thread's newest messages are.
+    consolidation_episode_chars: int = Field(default=6_000, ge=500)
+    # Have the chat model read the content of episodes that carry no
+    # ``semantic_assertions`` and extract entities and relationships from it.
+    # Off, the graph is built only from assertions a host attached at write
+    # time and from participants; a host that attaches none (a personal
+    # assistant, say) wants this on. See README, "Consolidation".
+    consolidation_content_extraction: bool = False
+    # The model consolidation calls, on the chat endpoint, if not ``chat_model``:
+    # extraction reads every episode once, so a cheap model is the usual pick.
+    consolidation_chat_model: str | None = None
+    # Completion budget for one extraction call.
+    consolidation_max_output_tokens: int = Field(default=2_048, ge=256)
+    # Existing entities shown to each extraction call, chosen by whether the
+    # batch mentions them, so it links to them rather than creating duplicates.
+    consolidation_known_entities: int = Field(default=40, ge=0)
+    # A batch the model keeps answering with something unusable is split and
+    # retried; an episode that fails on its own this many runs in a row is
+    # skipped until its content changes or the group is reset.
+    consolidation_max_attempts: int = Field(default=3, ge=1)
     crustdata_api_key: str | None = None
     crustdata_base_url: str = "https://api.crustdata.com"
     crustdata_api_version: str = "2025-11-01"

@@ -14,6 +14,11 @@ class CrustdataEnricher:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
 
+    @property
+    def configured(self) -> bool:
+        """Whether there is a key; without one consolidation skips enrichment entirely."""
+        return bool(self.settings.crustdata_api_key)
+
     async def enrich_company(self, name: str, domain: str | None) -> EnrichmentResult | None:
         if not domain:
             return None
