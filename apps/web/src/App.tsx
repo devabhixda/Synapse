@@ -47,7 +47,7 @@ type Health = {
 type Episode = {
   id: string
   kind: 'source' | 'retrieval'
-  source_type: 'slack' | 'meeting' | 'recall' | 'whatsapp' | 'call' | 'gemini' | 'email'
+  source_type: 'slack' | 'meeting' | 'recall' | 'whatsapp' | 'call' | 'gemini' | 'email' | 'document'
   content: string
   summary: string | null
   participants: string[]

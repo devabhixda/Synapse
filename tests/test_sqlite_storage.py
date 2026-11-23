@@ -287,6 +287,7 @@ async def test_a_database_from_before_the_newer_source_types_stores_them(tmp_pat
             models.SourceType.CALL,
             models.SourceType.GEMINI,
             models.SourceType.EMAIL,
+            models.SourceType.DOCUMENT,
         ):
             session.add(
                 models.Episode(
@@ -308,6 +309,7 @@ async def test_a_database_from_before_the_newer_source_types_stores_them(tmp_pat
 
     assert stored == [
         models.SourceType.CALL,
+        models.SourceType.DOCUMENT,
         models.SourceType.EMAIL,
         models.SourceType.GEMINI,
         models.SourceType.WHATSAPP,
