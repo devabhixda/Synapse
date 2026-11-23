@@ -114,7 +114,8 @@ asyncio.run(main())
 ```
 
 `source_type` records where a conversation came from: `SLACK`, `MEETING`,
-`WHATSAPP`, `CALL` or `GEMINI` (Gemini app chats) (`RECALL` marks the answers recall writes back). Databases
+`WHATSAPP`, `CALL`, `GEMINI` (Gemini app chats) or `EMAIL` (one per
+email thread) (`RECALL` marks the answers recall writes back). Databases
 made by earlier releases accept the newer values without a migration.
 
 `process` is idempotent on `source_id`: storing the same conversation again
