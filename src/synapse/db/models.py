@@ -117,6 +117,7 @@ class SourceType(StrEnum):
     CALL = "call"
     GEMINI = "gemini"
     EMAIL = "email"
+    DOCUMENT = "document"
 
 
 episode_kind_enum = Enum(
